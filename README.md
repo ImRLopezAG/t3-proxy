@@ -50,3 +50,7 @@ It never starts, stops or replaces the proxy and never reads its config or crede
 - The key goes only to loopback, redirects are refused, and it is stored in the Keychain (this device only).
 
 Provider logos in `Sources/T3ProxyUI/Resources/` are from @lobehub/icons-static-svg (MIT); see `ICONS-LICENSE.txt` there.
+
+## License
+
+MIT; see `LICENSE`.
