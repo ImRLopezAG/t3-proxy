@@ -38,12 +38,12 @@ public actor UsageRecorder {
     public static var defaultDatabaseURL: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/T3 Proxy/usage.sqlite")
     }
-    public static func otherRecorderPresent(fileManager: FileManager = .default) -> Bool {
+    public static func otherRecorderPresent(fileManager: FileManager = .default, state: ProxyDeckState? = nil) -> Bool {
         otherRecorderPresent(fileManager: fileManager, proxyDeckPath: SQLiteUsageSource.proxyDeckPath,
-                             overridePath: UserDefaults.standard.string(forKey: "usageDatabasePath"))
+                             overridePath: UserDefaults.standard.string(forKey: "usageDatabasePath"), state: state ?? ProxyDeckDetector.shared.cachedState)
     }
-    static func otherRecorderPresent(fileManager: FileManager, proxyDeckPath: String, overridePath: String?) -> Bool {
-        if fileManager.fileExists(atPath: proxyDeckPath) { return true }
+    static func otherRecorderPresent(fileManager: FileManager, proxyDeckPath: String, overridePath: String?, state: ProxyDeckState? = nil) -> Bool {
+        if (state ?? ProxyDeckDetector.fileState(path: proxyDeckPath, fileManager: fileManager)) == .active { return true }
         if let overridePath {
             return URL(fileURLWithPath: (overridePath as NSString).expandingTildeInPath).standardizedFileURL.resolvingSymlinksInPath()
                 != defaultDatabaseURL.standardizedFileURL.resolvingSymlinksInPath()
@@ -75,7 +75,7 @@ public actor UsageRecorder {
 
     public init(databaseURL: URL = UsageRecorder.defaultDatabaseURL, client: ManagementClient) {
         self.databaseURL = databaseURL; self.client = client
-        self.otherRecorder = { UsageRecorder.otherRecorderPresent() }; self.now = { Date() }
+        self.otherRecorder = { UsageRecorder.otherRecorderPresent(state: ProxyDeckDetector.shared.refresh()) }; self.now = { Date() }
     }
 
     init(databaseURL: URL, client: ManagementClient,
@@ -242,8 +242,8 @@ private struct UsageRecord: Codable {
     }
 }
 
-private enum UsageStoreError: Error { case unavailable }
-private enum UsageStore {
+enum UsageStoreError: Error { case unavailable }
+enum UsageStore {
     static let schema = """
         CREATE TABLE IF NOT EXISTS requests (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, account_key TEXT, auth_type TEXT NOT NULL, input INTEGER NOT NULL, output INTEGER NOT NULL, reasoning INTEGER NOT NULL, cached INTEGER NOT NULL, cache_read INTEGER NOT NULL, cache_creation INTEGER NOT NULL, total INTEGER NOT NULL, failed INTEGER NOT NULL, latency_ms INTEGER NOT NULL);
         CREATE INDEX IF NOT EXISTS requests_by_time ON requests (ts);
@@ -256,7 +256,7 @@ private enum UsageStore {
             return total
         }
     }
-    static func write(_ records: [UsageRecord], to url: URL, now: Date) throws -> Int {
+    fileprivate static func write(_ records: [UsageRecord], to url: URL, now: Date) throws -> Int {
         try withDB(url) { db in
             try exec(db, "BEGIN IMMEDIATE")
             do {
@@ -281,7 +281,7 @@ private enum UsageStore {
             } catch { try? exec(db, "ROLLBACK"); throw error }
         }
     }
-    private static func withDB<T>(_ url: URL, _ body: (OpaquePointer) throws -> T) throws -> T {
+    static func withDB<T>(_ url: URL, _ body: (OpaquePointer) throws -> T) throws -> T {
         let fm = FileManager.default, directory = url.deletingLastPathComponent()
         try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         guard (try fm.attributesOfItem(atPath: directory.path)[.type] as? FileAttributeType) == .typeDirectory else { throw UsageStoreError.unavailable }

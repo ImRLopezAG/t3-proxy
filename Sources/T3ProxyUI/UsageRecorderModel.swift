@@ -37,13 +37,12 @@ public final class UsageRecorderModel: ObservableObject {
 
     public init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        // Keep the saved choice even while detection is pending or Proxy Deck is active: the recorder itself refuses
+        // every queue read until a completed probe shows Proxy Deck isn't running (it re-checks before each pop).
+        // Overwriting it here switched recording off for good after a restart.
         let requested = defaults.bool(forKey: "usageRecorder.enabled")
-        let blocked = requested && UsageRecorder.otherRecorderPresent()
-        enabled = requested && !blocked
-        if blocked {
-            status = .blockedByOtherRecorder
-            defaults.set(false, forKey: "usageRecorder.enabled")
-        }
+        enabled = requested
+        if requested && UsageRecorder.otherRecorderPresent() { status = .blockedByOtherRecorder }
     }
 
     public func start(monitor: Monitor) {
@@ -71,7 +70,9 @@ public final class UsageRecorderModel: ObservableObject {
     /// Quit: stop popping, let an in-flight batch finish, then save (or spool) what was received.
     public func prepareForQuit() async {
         timer?.invalidate(); timer = nil
+        endpointWatch = nil
         await recorder?.shutdown()
+        recorder = nil
     }
 
     private func poll() async {

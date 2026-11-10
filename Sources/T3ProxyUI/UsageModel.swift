@@ -40,11 +40,11 @@ public final class UsageModel: ObservableObject {
         self.source = source ?? SQLiteUsageSource(path: path)
     }
 
-    /// Proxy Deck's history when its database exists (it owns the hub's usage queue), else T3 Proxy's own recording.
+    /// Proxy Deck's history while its recorder is active (it owns the hub's usage queue), else T3 Proxy's own recording.
     /// `usageDatabasePath` overrides both.
     private static func selectedPath() -> String {
         if let override = UserDefaults.standard.string(forKey: "usageDatabasePath") { return override }
-        return FileManager.default.fileExists(atPath: SQLiteUsageSource.proxyDeckPath)
+        return ProxyDeckDetector.shared.cachedState == .active
             ? SQLiteUsageSource.proxyDeckPath : UsageRecorder.defaultDatabaseURL.path
     }
 

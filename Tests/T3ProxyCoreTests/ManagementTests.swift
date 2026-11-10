@@ -180,8 +180,8 @@ let ok: @Sendable (URLRequest) -> (Int, String) = { r in r.httpMethod == "GET" ?
         let f = dir.appendingPathComponent("plans.json")
         try Data(#"{"ba7816bf8f01":{"plan":"max 20x","org":null,"orgId":"x","at":1},"aaaaaaaaaaaa":{"plan":"team","org":"AI-Robotix","at":1},"bbbbbbbbbbbb":{"plan":"pwned","org":"a@b.com"},"bad":{"plan":"pro"}}"#.utf8).write(to: f)
         let plans = PlanCache.load(path: f.path)
-        #expect(plans["ba7816bf8f01"] == PlanInfo(plan: "max 20x", org: nil))
-        #expect(plans["aaaaaaaaaaaa"] == PlanInfo(plan: "team", org: "AI-Robotix"))
+        #expect(plans["ba7816bf8f01"] == PlanInfo(plan: "max 20x", org: nil, observedAt: Date(timeIntervalSince1970: 0.001)))
+        #expect(plans["aaaaaaaaaaaa"] == PlanInfo(plan: "team", org: "AI-Robotix", observedAt: Date(timeIntervalSince1970: 0.001)))
         #expect(plans["bbbbbbbbbbbb"] == nil)   // unknown plan word and an email as org are dropped
         #expect(plans["bad"] == nil)
         #expect(PlanCache.load(path: dir.appendingPathComponent("missing.json").path).isEmpty)

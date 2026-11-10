@@ -239,7 +239,8 @@ public enum LiveQuotaParser {
             }
             if plan == "max", let tier = org["rate_limit_tier"] as? String,
                let match = tier.lowercased().firstMatch(of: /max_([1-9]\d?)x/) { plan = "max \(match.1)x" }
-            return PlanInfo(plan: allowedPlan(plan), org: ["claude_team", "claude_enterprise"].contains(type) ? PlanCache.cleanOrg(org["name"] as? String) : nil)
+            return PlanInfo(plan: allowedPlan(plan), org: ["claude_team", "claude_enterprise"].contains(type) ? PlanCache.cleanOrg(org["name"] as? String) : nil,
+                            orgID: PlanCache.orgFingerprint(org["uuid"] as? String))
         }
         guard provider == .codex, let accountID, let all = o["accounts"] as? [String: Any],
               let entry = all[accountID] as? [String: Any], let a = entry["account"] as? [String: Any] else { return PlanInfo(plan: nil, org: nil) }
@@ -389,8 +390,15 @@ public enum ResetCreditResult: Sendable, Equatable {
                 if due {
                     var ok = false
                     if let data = try? await read(a.provider == .claude ? .claudeProfile : .codexAccounts, account: a),
-                       let plan = try? LiveQuotaParser.plan(data, provider: a.provider, accountID: a.chatgptAccountID) {
+                       var plan = try? LiveQuotaParser.plan(data, provider: a.provider, accountID: a.chatgptAccountID) {
+                        plan.observedAt = now
                         accountPlans[id] = plan; ok = true
+                        // Keeps the organization fingerprint fresh for the T3 Code limits shim's local-login match
+                        // now that Proxy Deck no longer records it (only the fingerprint is stored, never the uuid).
+                        if a.provider == .claude, let index = a.authIndex, !index.isEmpty {
+                            let key = PlanCache.accountKey(index), info = plan
+                            Task.detached(priority: .utility) { PlanCache.record(key: key, info) }
+                        }
                     }
                     planRead[id] = (now, ok)
                 }

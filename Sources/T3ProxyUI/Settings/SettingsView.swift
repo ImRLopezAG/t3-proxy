@@ -15,6 +15,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     case usage = "Usage"
     case config = "Config"
     case logs = "Logs"
+    case proxyDeck = "Proxy Deck"
     case system = "About Proxy"
     var id: Self { self }
     var symbol: String {
@@ -30,6 +31,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .usage: "chart.bar.xaxis"
         case .config: "slider.horizontal.3"
         case .logs: "doc.text.magnifyingglass"
+        case .proxyDeck: "arrow.right.arrow.left.circle"
         case .system: "info.circle"
         }
     }
@@ -46,6 +48,7 @@ public struct SettingsView: View {
     @ObservedObject var monitor: Monitor
     @StateObject private var accounts: AccountsModel
     @ObservedObject private var router = SettingsRouter.shared
+    @ObservedObject private var proxyDeck = ProxyDeckMigrationModel.shared
 
     public init(monitor: Monitor) {
         self.monitor = monitor
@@ -54,7 +57,8 @@ public struct SettingsView: View {
 
     public var body: some View {
         NavigationSplitView {
-            List(SettingsPane.allCases, selection: $router.pane) { p in
+            // The Proxy Deck pane only matters on Macs that have (or had) Proxy Deck.
+            List(SettingsPane.allCases.filter { $0 != .proxyDeck || proxyDeck.proxyDeckState != .absent }, selection: $router.pane) { p in
                 Label(p.rawValue, systemImage: p.symbol).tag(p)
             }
             .navigationSplitViewColumnWidth(min: 170, ideal: 190, max: 240)
@@ -71,6 +75,7 @@ public struct SettingsView: View {
             case .usage: UsagePane(monitor: monitor)
             case .config: ConfigPane(monitor: monitor)
             case .logs: LogsPane(monitor: monitor)
+            case .proxyDeck: ProxyDeckPane()
             case .system: SystemPane(monitor: monitor)
             }
         }

@@ -1,6 +1,6 @@
 cask "t3-proxy" do
-  version "0.1.0"
-  sha256 "01c45dd324be2e4d8a30c4270785180ba53b6ad82e28d133debfa64144f32257"
+  version "0.2.0"
+  sha256 "80f180bfc002949409105947f1bd9fe8df119e51486655f26d02ec320c0fcbdf"
 
   url "https://github.com/ImRLopezAG/t3-proxy/releases/download/v#{version}/T3-Proxy.zip"
   name "T3 Proxy"

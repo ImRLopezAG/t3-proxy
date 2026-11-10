@@ -65,6 +65,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         UsageModel.shared.start()
         // Opt-in and off by default; never runs while another recorder (Proxy Deck) owns the hub's usage queue.
         UsageRecorderModel.shared.start(monitor: monitor)
+        // T3 Code's limits endpoint on 127.0.0.1:8318, claimed only while Proxy Deck's launch agent is not loaded;
+        // retiring Proxy Deck is a separate, confirmed action in Settings → Proxy Deck.
+        ProxyDeckMigrationModel.shared.start(monitor: monitor)
         let t3 = T3CodeModel.shared()
         t3.start()
         t3.$snapshot.combineLatest(t3.$status).map { $1.isConnected && T3ThreadBoard.needsAttention($0) }.removeDuplicates()
