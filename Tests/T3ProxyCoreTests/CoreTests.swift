@@ -94,3 +94,25 @@ func mgmtCalls() -> [URLRequest] { Stub.seen.filter { $0.url!.path.hasPrefix("/v
         #expect(compact(950) == "950"); #expect(compact(2_460_000_000) == "2.5B"); #expect(compact(383_000_000) == "383M"); #expect(compact(2000) == "2K")
     }
 }
+
+extension MonitorTests {
+    /// A live reading belongs to one login: a new account reusing the file name never shows it, and
+    /// forgetting a deleted account drops it from the panel at once.
+    @Test func liveReadingsStayWithTheirLoginAndForgetDropsTheAccount() async {
+        nonisolated(unsafe) var index = "login-1"
+        let m = monitor(MemStore("k")) { r in
+            !r.url!.path.hasPrefix("/v0") ? (200, root)
+                : (200, #"{"files":[{"name":"claude-a.json","provider":"claude","status":"active","auth_index":"\#(index)"}]}"#)
+        }
+        await m.refresh()
+        let reading = QuotaReading(observedAt: Date(), windows: [.init(id: "seven-day", label: "Weekly", usedPercent: 42, resetAt: Date().addingTimeInterval(86400))], models: [:], plan: nil)
+        m.applyLive(["claude-a": reading], epoch: m.keyEpoch)
+        #expect(m.accounts.first?.quota.window(.weekly)?.usedPercent == 42)
+        index = "login-2"                                  // deleted, then a different login under the same name
+        await m.refresh()
+        #expect(m.accounts.first?.quota.window(.weekly)?.usedPercent == nil)
+        index = "login-1"
+        await m.forget(accountID: "claude-a.json")         // forget also drops the reading for good
+        #expect(m.accounts.first?.quota.window(.weekly)?.usedPercent == nil)
+    }
+}

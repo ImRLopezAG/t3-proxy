@@ -16,7 +16,11 @@ struct ProxyDeckPane: View {
                 LabeledContent("T3 Code limits endpoint") { Label(shimText, systemImage: shimSymbol).foregroundStyle(shimColor) }
                 LabeledContent("Usage recording") { Text(recorder.enabled ? "On" : "Off").foregroundStyle(.secondary) }
             } header: { Text("Status") } footer: {
-                Text("Proxy Deck currently answers T3 Code's limit bars on 127.0.0.1:8318 and records the hub's usage. After it is retired, T3 Proxy does both, on the same address, so T3 Code needs no change.")
+                Text(model.stoppedButSettling
+                     ? "Proxy Deck is stopped. Recording turns on by itself once its database has been quiet for 15 minutes, so nothing else is still reading the hub's usage queue."
+                     : model.proxyDeckState == .active
+                     ? "Proxy Deck currently answers T3 Code's limit bars on 127.0.0.1:8318 and records the hub's usage. After it is retired, T3 Proxy does both, on the same address, so T3 Code needs no change."
+                     : "T3 Proxy answers T3 Code's limit bars on 127.0.0.1:8318 and records the hub's usage. Proxy Deck's files are kept; Restore brings it back.")
             }
 
             Section {
@@ -84,12 +88,12 @@ struct ProxyDeckPane: View {
 
     private var stateText: String {
         switch model.proxyDeckState {
-        case .active: "Running"
+        case .active: model.stoppedButSettling ? "Stopped · waiting for its database to go quiet" : "Running"
         case .retired: "Retired (files kept)"
         case .absent: "Not installed"
         }
     }
-    private var stateSymbol: String { model.proxyDeckState == .active ? "bolt.circle" : "checkmark.circle" }
+    private var stateSymbol: String { model.proxyDeckState == .active ? (model.stoppedButSettling ? "hourglass" : "bolt.circle") : "checkmark.circle" }
     private var stateColor: Color { model.proxyDeckState == .active ? .secondary : .green }
 
     private var shimText: String {

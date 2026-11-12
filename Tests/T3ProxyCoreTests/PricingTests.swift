@@ -18,6 +18,9 @@ private func totals(input: Int64 = 0, output: Int64 = 0, cached: Int64 = 0, crea
     #expect(Pricing.price(for: "anthropic.claude-sonnet-5-5")?.output == 10)
     #expect(Pricing.price(for: "claude-fable-5-1@20261001")?.cacheRead == 0.25)
     #expect(Pricing.price(for: "gpt-6.1-sol")?.cacheRead == 0.10)
+    // Point releases are their own entries, not "-2" snapshots of the family.
+    #expect(Pricing.price(for: "claude-fable-5-2") == ModelPrice(input: 8, output: 40, cacheRead: 0.20, cacheWrite: 10))
+    #expect(Pricing.price(for: "claude-sonnet-5-5")?.cacheRead == 0.10)
     // A newer version or a sibling model must not inherit a price.
     #expect(Pricing.price(for: "claude-opus-5-9") == nil)
     #expect(Pricing.price(for: "gpt-6.1-sol-mini") == nil)

@@ -11,6 +11,8 @@ public enum ManagementError: Error, Equatable {
     case notFound
     /// The hub answered but reported a failed refresh.
     case refreshFailed
+    /// Runtime-only credentials (no file on disk) can't be deleted through the hub's file routes.
+    case runtimeOnly
 }
 
 public enum CredentialStatus: String, Sendable, Equatable { case healthy, cooling, disabled, error }
@@ -228,6 +230,23 @@ public struct ManagementClient: Sendable {
            r.ok == false || (r.results ?? []).contains(where: { $0.success == false }) { throw ManagementError.refreshFailed }
     }
 
+    /// Deletes one credential file from the hub (`DELETE /v8/management/credentials?name=<file>.json`), which also
+    /// disables it in the hub's runtime. Never sends `all`. Re-reads the list first and refuses when the account is
+    /// gone, runtime-only, or changed since the user confirmed (another login under that name, or a newer file).
+    public func deleteCredential(_ expected: Credential, key: String) async throws {
+        try checkName(expected.name)
+        guard !expected.runtimeOnly else { throw ManagementError.runtimeOnly }
+        // Without a login id or a file version there is nothing to tell "the same account" from a replacement.
+        guard expected.authIndex?.isEmpty == false || expected.updatedMarker != nil else { throw RoutingError.staleCredential }
+        guard let current = try await entries(key: key).compactMap(Credential.init).first(where: { $0.name == expected.name })
+        else { throw ManagementError.notFound }
+        guard !current.runtimeOnly else { throw ManagementError.runtimeOnly }
+        guard current.provider == expected.provider, current.providerName == expected.providerName,
+              current.authIndex == expected.authIndex, current.chatgptAccountID == expected.chatgptAccountID,
+              current.updatedMarker == expected.updatedMarker else { throw RoutingError.staleCredential }
+        try await send("DELETE", "v8/management/credentials", nil, key: key, query: [URLQueryItem(name: "name", value: expected.name)])
+    }
+
     // MARK: -
 
     func checkName(_ n: String) throws { guard ManagementRules.isValidFileName(n) else { throw ManagementError.invalidName } }
@@ -240,9 +259,18 @@ public struct ManagementClient: Sendable {
 
     @discardableResult
     func send(_ method: String, _ path: String, _ body: [String: any Sendable]?, key: String,
-                      timeout: TimeInterval = 30) async throws -> Data {
+                      timeout: TimeInterval = 30, query: [URLQueryItem] = []) async throws -> Data {
         guard gate.permits(key) else { throw ManagementError.locked }
-        var r = URLRequest(url: endpoint.base.appendingPathComponent(path), timeoutInterval: timeout)
+        var url = endpoint.base.appendingPathComponent(path)
+        if !query.isEmpty {
+            guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { throw ManagementError.invalidName }
+            parts.queryItems = query
+            // `+` would read as a space in a query; encode it so the file name arrives intact.
+            parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
+            guard let u = parts.url else { throw ManagementError.invalidName }
+            url = u
+        }
+        var r = URLRequest(url: url, timeoutInterval: timeout)
         r.httpMethod = method
         r.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         if let body {

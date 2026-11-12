@@ -65,10 +65,16 @@ import T3ProxyCore
     @Published public private(set) var actionInProgress = false
     @Published public private(set) var retirementResult: ProxyDeckRetirement.Result?
     @Published public private(set) var shimStatus: T3LimitsServerStatus = .stopped
+    /// Proxy Deck was stopped but its database changed in the last 15 minutes ("Stopped · waiting to go quiet").
+    @Published public private(set) var stoppedButSettling = false
     private weak var monitor: Monitor?
     private var timer: Timer?
     private var watch: AnyCancellable?
-    private var enableRecordingWhenInactive = false
+    /// Persisted, so a restart between Retire and the end of the quiet period still turns recording on.
+    private var enableRecordingWhenInactive: Bool {
+        get { UserDefaults.standard.bool(forKey: "proxyDeck.enableRecordingWhenRetired") }
+        set { UserDefaults.standard.set(newValue, forKey: "proxyDeck.enableRecordingWhenRetired") }
+    }
     public init() {}
     /// The lead calls once at launch. Never stops Proxy Deck or imports automatically.
     public func start(monitor: Monitor) {
@@ -83,6 +89,7 @@ import T3ProxyCore
     }
     public func refresh() async {
         proxyDeckState = await Task.detached(priority: .utility) { ProxyDeckDetector.shared.refresh() }.value
+        stoppedButSettling = proxyDeckState == .active && ProxyDeckDetector.shared.agentLoaded == false
         if enableRecordingWhenInactive && proxyDeckState != .active {
             enableRecordingWhenInactive = false
             UsageRecorderModel.shared.enabled = true

@@ -232,6 +232,8 @@ private struct UsageRecord: Codable {
         guard let canonical = try? JSONSerialization.data(withJSONObject: raw, options: [.sortedKeys]) else { return nil }
         id = requestID.isEmpty ? SHA256.hash(data: canonical).map { String(format: "%02x", $0) }.joined() : requestID
     }
+    /// Claude's cache writes appear only in `total_tokens` (see `SQLiteUsageSource.cacheCreation`).
+    var cacheCreation: Int64 { provider == "claude" ? max(0, total - input - output - cached) : 0 }
     /// Re-checks rows read back from the spool against the same bounds as fresh records.
     var isValid: Bool {
         func short(_ s: String, _ max: Int, _ pattern: String) -> Bool { s.count <= max && s.range(of: pattern, options: .regularExpression) != nil }
@@ -261,7 +263,7 @@ enum UsageStore {
             try exec(db, "BEGIN IMMEDIATE")
             do {
                 var statement: OpaquePointer?
-                guard sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO requests VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,?13,?14)", -1, &statement, nil) == SQLITE_OK, let statement else { throw UsageStoreError.unavailable }
+                guard sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO requests VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?15,?12,?13,?14)", -1, &statement, nil) == SQLITE_OK, let statement else { throw UsageStoreError.unavailable }
                 defer { sqlite3_finalize(statement) }
                 for r in records {
                     sqlite3_reset(statement); sqlite3_clear_bindings(statement)
@@ -271,7 +273,7 @@ enum UsageStore {
                             guard rc == SQLITE_OK else { throw UsageStoreError.unavailable }
                         }
                     }
-                    for (index, value) in [(2, r.ts), (7, r.input), (8, r.output), (9, r.reasoning), (10, r.cached), (11, r.cached), (12, r.total), (13, r.failed), (14, r.latency)] {
+                    for (index, value) in [(2, r.ts), (7, r.input), (8, r.output), (9, r.reasoning), (10, r.cached), (11, r.cached), (12, r.total), (13, r.failed), (14, r.latency), (15, r.cacheCreation)] {
                         guard sqlite3_bind_int64(statement, Int32(index), value) == SQLITE_OK else { throw UsageStoreError.unavailable }
                     }
                     guard sqlite3_step(statement) == SQLITE_DONE else { throw UsageStoreError.unavailable }

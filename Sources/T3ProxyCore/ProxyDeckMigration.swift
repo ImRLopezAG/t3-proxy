@@ -91,6 +91,10 @@ public final class ProxyDeckDetector: @unchecked Sendable {
         return next
     }
 
+    /// Whether the last completed probe found Proxy Deck's launch agent loaded (nil before the first probe).
+    /// `.active` with an unloaded agent means it was stopped and its database is still within the quiet period.
+    public var agentLoaded: Bool? { lock.lock(); defer { lock.unlock() }; return agentLoadedAtLastProbe }
+
     /// Retire, Restore and port-ownership changes call this: earlier probes no longer count.
     public func invalidate() {
         lock.lock(); generation += 1; agentLoadedAtLastProbe = nil; lock.unlock()

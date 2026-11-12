@@ -179,8 +179,12 @@ public struct SQLiteUsageSource: UsageSource {
 
     static let sums = """
         COUNT(*), COALESCE(SUM(failed),0), COALESCE(SUM(total),0), COALESCE(SUM(input),0), COALESCE(SUM(output),0),
-        COALESCE(SUM(reasoning),0), COALESCE(SUM(CASE WHEN cache_read > 0 THEN cache_read ELSE cached END),0), COALESCE(SUM(cache_creation),0)
+        COALESCE(SUM(reasoning),0), COALESCE(SUM(CASE WHEN cache_read > 0 THEN cache_read ELSE cached END),0), COALESCE(SUM(\(cacheCreation)),0)
         """
+    /// The hub's usage queue has no cache-write field: for Claude it counts writes only in `total_tokens`
+    /// (total = input + output + cache read + cache write; input excludes cache). Rows saved without the
+    /// split get it back from that remainder. OpenAI's `input` already includes cache reads, so it never applies.
+    static let cacheCreation = "CASE WHEN cache_creation = 0 AND provider = 'claude' AND total > input + output + cached THEN total - input - output - cached ELSE cache_creation END"
 
     public func daily(days: Int, now: Date = Date(), calendar: Calendar = .current) throws(UsageError) -> [UsageDay] {
         let today = calendar.startOfDay(for: now)

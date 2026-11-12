@@ -220,6 +220,9 @@ struct AccountActions: View {
             .disabled(busy || c.retryAt == nil)
         Button("Refresh Token", systemImage: "arrow.triangle.2.circlepath") { ask(.refresh(c)) }
             .disabled(busy)
+        Divider()
+        Button("Delete Account…", systemImage: "trash", role: .destructive) { ask(.delete(c)) }
+            .disabled(busy || c.runtimeOnly)
     }
 }
 
@@ -265,6 +268,8 @@ struct AccountInspector: View {
                     .disabled(model.busy != nil || c.retryAt == nil)
                 Button("Refresh Token", systemImage: "arrow.triangle.2.circlepath") { ask(.refresh(c)) }
                     .disabled(model.busy != nil)
+                Button("Delete Account…", systemImage: "trash", role: .destructive) { ask(.delete(c)) }
+                    .disabled(model.busy != nil || c.runtimeOnly)
                 if model.busy == c.name { ProgressView().controlSize(.small) }
             }
         }

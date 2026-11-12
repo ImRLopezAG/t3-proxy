@@ -192,3 +192,59 @@ let ok: @Sendable (URLRequest) -> (Int, String) = { r in r.httpMethod == "GET" ?
         #expect(codex.plan == "team")   // the hub's own plan wins
     }
 }
+
+extension ManagementTests {
+    /// One exact DELETE with the file name as the only query item; `all` is never sent.
+    @Test func deleteSendsOneNamedDeleteAfterReconfirming() async throws {
+        let m = mgmtMonitor(MemStore("k"), ok)
+        let list = try await m.management { try await $0.credentials(key: $1) }
+        let target = try #require(list.first { $0.name == "codex-b.json" })
+        MStub.seen = []
+        try await m.management { try await $0.deleteCredential(target, key: $1) }
+        let calls = v8Calls()
+        #expect(calls.map { "\($0.httpMethod!) \($0.url!.path)" } == ["GET /v8/management/credentials", "DELETE /v8/management/credentials"])
+        let del = try #require(calls.last)
+        #expect(del.url?.query == "name=codex-b.json")
+        #expect(del.url?.host == "127.0.0.1")
+        let items = URLComponents(url: try #require(del.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+        #expect(items.map(\.name) == ["name"])   // never `all`
+        #expect(del.httpBody == nil)
+    }
+
+    /// Changed since confirming (another login under the name), missing, or runtime-only: nothing is deleted.
+    @Test func deleteRefusesStaleMissingAndRuntimeOnly() async throws {
+        let m = mgmtMonitor(MemStore("k"), ok)
+        let list = try await m.management { try await $0.credentials(key: $1) }
+        var stale = try #require(list.first { $0.name == "codex-b.json" }); stale.authIndex = "replaced-login"
+        MStub.seen = []
+        await #expect(throws: RoutingError.staleCredential) { try await m.management { try await $0.deleteCredential(stale, key: $1) } }
+        var gone = stale; gone.name = "missing.json"; gone.authIndex = "ai-2"
+        await #expect(throws: ManagementError.notFound) { try await m.management { try await $0.deleteCredential(gone, key: $1) } }
+        var runtime = try #require(list.first { $0.name == "claude-a.json" }); runtime.runtimeOnly = true
+        await #expect(throws: ManagementError.runtimeOnly) { try await m.management { try await $0.deleteCredential(runtime, key: $1) } }
+        #expect(!v8Calls().contains { $0.httpMethod == "DELETE" })
+    }
+
+    @Test func plusInAFileNameIsEncoded() async throws {
+        let m = mgmtMonitor(MemStore("k"), ok)
+        try await m.management { try await $0.send("DELETE", "v8/management/credentials", nil, key: $1,
+                                                    query: [URLQueryItem(name: "name", value: "a+b.json")]) }
+        #expect(v8Calls().last?.url?.query == "name=a%2Bb.json")
+    }
+}
+
+extension ManagementTests {
+    /// Provider name and ChatGPT account count as identity; an account with no identity can't be confirmed.
+    @Test func deleteComparesFullIdentity() async throws {
+        let m = mgmtMonitor(MemStore("k"), ok)
+        let list = try await m.management { try await $0.credentials(key: $1) }
+        var renamedProvider = try #require(list.first { $0.name == "xai-d.json" }); renamedProvider.providerName = "gemini"
+        var otherWorkspace = try #require(list.first { $0.name == "codex-b.json" }); otherWorkspace.chatgptAccountID = "another"
+        var anonymous = try #require(list.first { $0.name == "claude-a.json" }); anonymous.authIndex = nil; anonymous.updatedMarker = nil
+        MStub.seen = []
+        for c in [renamedProvider, otherWorkspace, anonymous] {
+            await #expect(throws: RoutingError.staleCredential) { try await m.management { try await $0.deleteCredential(c, key: $1) } }
+        }
+        #expect(!v8Calls().contains { $0.httpMethod == "DELETE" })
+    }
+}

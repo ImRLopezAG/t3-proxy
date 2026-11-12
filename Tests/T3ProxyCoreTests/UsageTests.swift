@@ -477,3 +477,28 @@ private func malformWALSchema(_ path: String) throws {
     #expect(s.last30.total == 100)
     #expect(try source.costs(start: now.addingTimeInterval(-86400), end: now)[.claude] != nil)
 }
+
+@Test func claudeRowsSavedWithoutACacheWriteSplitGetItFromTheRemainder() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("t3usage-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let path = dir.appendingPathComponent("usage.sqlite").path
+    var db: OpaquePointer?
+    sqlite3_open(path, &db)
+    let now = Date(timeIntervalSince1970: 1_794_312_000), ts = Int64(now.timeIntervalSince1970 * 1000) - 1000
+    sqlite3_exec(db, """
+        CREATE TABLE requests (id TEXT PRIMARY KEY, ts INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL, account_key TEXT,
+          auth_type TEXT, input INTEGER NOT NULL, output INTEGER NOT NULL, reasoning INTEGER NOT NULL, cached INTEGER NOT NULL,
+          cache_read INTEGER NOT NULL, cache_creation INTEGER NOT NULL, total INTEGER NOT NULL, failed INTEGER NOT NULL, latency_ms INTEGER);
+        INSERT INTO requests VALUES ('a', \(ts), 'claude', 'claude-opus-5-5', 'k', 'oauth', 0, 1000000, 0, 10000000, 10000000, 0, 12000000, 0, 1);
+        INSERT INTO requests VALUES ('b', \(ts), 'claude', 'claude-opus-5-5', 'k', 'oauth', 0, 0, 0, 0, 0, 7, 7, 0, 1);
+        INSERT INTO requests VALUES ('c', \(ts), 'codex', 'gpt-6.1-sol', 'k', 'oauth', 1000000, 0, 0, 500000, 500000, 0, 1000000, 0, 1);
+        """, nil, nil, nil)
+    sqlite3_close(db)
+    let detail = try SQLiteUsageSource(path: path).rangeDetail(days: 1, now: now)
+    // 'a' hides 1M written tokens in its total; 'b' already has its split and is not counted twice.
+    #expect(detail.totals.cacheCreation == 1_000_007)
+    // $20 out + $2 read + $5 written (at the 5-minute rate), plus Codex's $1 uncached + $0.05 read.
+    #expect(abs(detail.cost.usd - (20 + 2 + 5 + 1 + 0.05 + 7 * 5 / 1_000_000)) < 1e-6)
+    #expect(detail.cost.unpriced.isEmpty)
+}

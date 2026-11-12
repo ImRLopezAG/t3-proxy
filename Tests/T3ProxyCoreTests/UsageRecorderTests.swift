@@ -80,6 +80,19 @@ extension UsageRecorderTests {
         RecorderStub.requests = []
         return UsageRecorder(databaseURL: url, client: ManagementClient(protocolClasses: [RecorderStub.self]), otherRecorder: other, now: { clock.now() })
     }
+    @Test func claudeCacheWritesComeFromTheTotalsRemainder() async throws {
+        let url = location(), clock = RecorderClock()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        // The queue has no cache-write field: 1,000 total - 10 in - 40 out - 900 read = 50 written. Codex input already
+        // includes its cache reads, so its remainder is never a write.
+        let claude = #"{"request_id":"w-1","timestamp":"2026-11-10T10:00:00Z","provider":"claude","model":"claude-opus-5-5","auth_type":"oauth","tokens":{"input_tokens":10,"output_tokens":40,"reasoning_tokens":0,"cached_tokens":900,"total_tokens":1000},"failed":false,"latency_ms":1}"#
+        let codex = #"{"request_id":"w-2","timestamp":"2026-11-10T10:00:00Z","provider":"codex","model":"gpt-6.1-sol","auth_type":"oauth","tokens":{"input_tokens":1000,"output_tokens":40,"reasoning_tokens":0,"cached_tokens":900,"total_tokens":1040},"failed":false,"latency_ms":1}"#
+        RecorderStub.handler = { r in r.url!.path.hasSuffix("config") ? (200, recorderConfig) : (200, "[" + claude + "," + codex + "]") }
+        let recorder = configured(url, clock: clock)
+        await recorder.setEnabled(true)
+        _ = await recorder.tick(key: "fake")
+        #expect(try recorderRows(url, "SELECT id,cache_creation FROM requests ORDER BY id") == [["w-1", "50"], ["w-2", "0"]])
+    }
     @Test func mapsSchemaAndExistingReaderAndKeepsSecretsOut() async throws {
         let url = location(), clock = RecorderClock()
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }

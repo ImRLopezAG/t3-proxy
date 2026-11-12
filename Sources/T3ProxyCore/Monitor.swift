@@ -21,6 +21,9 @@ public final class Monitor: ObservableObject {
     private var refreshAgain = false
     /// Latest live quota reads by Account.id (LiveQuotaService), merged over the hub's recorded quota.
     private var live: [String: QuotaReading] = [:]
+    /// The login (auth index) each live reading belongs to: a reading never attaches to a different account that
+    /// later reuses the same file name (for example after a delete and a new sign-in).
+    private var liveOwner: [String: String] = [:]
 
     public init(client: ProxyClient = .init(), store: KeyStore = KeychainKeyStore(), management: ManagementClient? = nil) {
         self.client = client; self.store = store; self.endpoint = client.endpoint
@@ -58,7 +61,7 @@ public final class Monitor: ObservableObject {
         m.gate = c.gate
         client = c; managementClient = m; endpoint = e
         keyGeneration += 1
-        live = [:]; accounts = []; accountsUpdatedAt = nil
+        live = [:]; liveOwner = [:]; accounts = []; accountsUpdatedAt = nil
         management = .noKey; reachability = .unknown
         await refresh()
     }
@@ -72,7 +75,7 @@ public final class Monitor: ObservableObject {
         }
     }
 
-    private func lockOut() { management = .rejected; accounts = []; accountsUpdatedAt = nil; live = [:] }
+    private func lockOut() { management = .rejected; accounts = []; accountsUpdatedAt = nil; live = [:]; liveOwner = [:] }
 
     /// Publishes live quota reads. A live reading replaces the recorded one unless the hub recorded something newer.
     /// Changes whenever the key is saved or removed; pass the value read before starting live reads.
@@ -80,13 +83,26 @@ public final class Monitor: ObservableObject {
 
     public func applyLive(_ readings: [String: QuotaReading], epoch: Int) {
         guard management == .connected, epoch == keyGeneration else { return }
-        for (id, r) in readings { live[id] = r }
+        for (id, r) in readings {
+            guard let owner = accounts.first(where: { $0.id == id })?.authIndex, !owner.isEmpty else { continue }
+            live[id] = r; liveOwner[id] = owner
+        }
         accounts = merged(accounts)
+    }
+
+    /// After an account is deleted on the hub: drop it and its live reading now, then re-read the hub.
+    /// Accepts the account id ("claude-a") or the credential's file name ("claude-a.json").
+    public func forget(accountID: String) async {
+        let id = accountID.hasSuffix(".json") ? String(accountID.dropLast(5)) : accountID
+        for key in [id, accountID] { live[key] = nil; liveOwner[key] = nil }
+        accounts.removeAll { $0.id == id || $0.id == accountID }
+        await refresh()
     }
 
     private func merged(_ list: [Account]) -> [Account] {
         list.map { a in
-            guard let l = live[a.id], let seen = l.observedAt, seen >= (a.quota.observedAt ?? .distantPast) else { return a }
+            guard let l = live[a.id], let owner = liveOwner[a.id], owner == a.authIndex,
+                  let seen = l.observedAt, seen >= (a.quota.observedAt ?? .distantPast) else { return a }
             var out = a
             var q = l
             if q.plan == nil { q.plan = a.quota.plan }
@@ -105,13 +121,13 @@ public final class Monitor: ObservableObject {
         guard client.gate.permits(k) else { return .previouslyRejected }
         guard store.save(k) else { return .keychainFailed }
         keyGeneration += 1
-        live = [:]
+        live = [:]; liveOwner = [:]
         management = .noKey   // clears a rejected lock for the new key
         await refresh()
         return .saved
     }
 
-    public func removeKey() { keyGeneration += 1; store.remove(); management = .noKey; accounts = []; accountsUpdatedAt = nil; live = [:] }
+    public func removeKey() { keyGeneration += 1; store.remove(); management = .noKey; accounts = []; accountsUpdatedAt = nil; live = [:]; liveOwner = [:] }
 
     /// Reads never overlap. Without a key, or after a rejection, no management request is sent.
     public func refresh() async {

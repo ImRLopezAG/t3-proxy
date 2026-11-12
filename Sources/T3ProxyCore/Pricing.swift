@@ -27,9 +27,9 @@ public struct ModelPrice: Sendable, Equatable {
 }
 
 public enum Pricing {
-    /// Standard-tier list prices, USD per 1M tokens, as of 2026-11-06.
+    /// Standard-tier list prices, USD per 1M tokens, as of 2026-11-11.
     ///
-    /// Anthropic: the `claude-api` reference (pricing table cached 2026-10-06; cache reads as stated per model,
+    /// Anthropic: the `claude-api` reference (pricing table cached 2026-11-03; Fable 5.2 $8/$40 with $0.20 reads, Sonnet 5.5 $0.10 reads; cache reads as stated per model,
     /// "~0.1× base input" elsewhere; cache writes 1.25× base input for the 5-minute TTL). The proxy can't tell
     /// 5-minute from 1-hour writes (2×), so writes are priced at 1.25× and may undercount. Haiku 5.5 is $0.10/$0.50
     /// only for prompts up to 100K tokens ($0.50/$2.50 beyond); totals here use the lower tier.
@@ -39,11 +39,12 @@ public enum Pricing {
     /// gpt-6-astra, gpt-6-luna and gpt-6.1-terra are deliberately unpriced: only third-party trackers could be
     /// checked, not an official source.
     public static let table: [String: ModelPrice] = [
+        "claude-fable-5-2": .init(input: 8, output: 40, cacheRead: 0.20, cacheWrite: 10),
         "claude-fable-5-1": .init(input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5),
         "claude-fable-5": .init(input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5),
         "claude-opus-5-5": .init(input: 4, output: 20, cacheRead: 0.20, cacheWrite: 5),
         "claude-opus-5": .init(input: 5, output: 25, cacheRead: 0.50, cacheWrite: 6.25),
-        "claude-sonnet-5-5": .init(input: 2, output: 10, cacheRead: 0.20, cacheWrite: 2.5),
+        "claude-sonnet-5-5": .init(input: 2, output: 10, cacheRead: 0.10, cacheWrite: 2.5),
         "claude-sonnet-5": .init(input: 2, output: 10, cacheRead: 0.20, cacheWrite: 2.5),
         "claude-haiku-5-5": .init(input: 0.10, output: 0.50, cacheRead: 0.01, cacheWrite: 0.125),
         "gpt-6.1-sol": .init(input: 2, output: 10, cacheRead: 0.10, cacheWrite: nil, inputIncludesCacheRead: true),
