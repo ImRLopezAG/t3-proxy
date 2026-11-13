@@ -14,6 +14,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     case t3code = "T3 Code"
     case usage = "Usage"
     case config = "Config"
+    case plugins = "Plugins"
     case logs = "Logs"
     case proxyDeck = "Proxy Deck"
     case system = "About Proxy"
@@ -30,6 +31,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .t3code: "terminal"
         case .usage: "chart.bar.xaxis"
         case .config: "slider.horizontal.3"
+        case .plugins: "puzzlepiece.extension"
         case .logs: "doc.text.magnifyingglass"
         case .proxyDeck: "arrow.right.arrow.left.circle"
         case .system: "info.circle"
@@ -74,6 +76,7 @@ public struct SettingsView: View {
             case .t3code: T3CodePane(monitor: monitor)
             case .usage: UsagePane(monitor: monitor)
             case .config: ConfigPane(monitor: monitor)
+            case .plugins: PluginsPane(monitor: monitor)
             case .logs: LogsPane(monitor: monitor)
             case .proxyDeck: ProxyDeckPane()
             case .system: SystemPane(monitor: monitor)

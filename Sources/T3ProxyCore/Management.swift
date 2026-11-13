@@ -1,5 +1,8 @@
 import Foundation
 
+/// A plugin conflict may carry a restart instruction; its raw body never reaches the UI.
+enum ManagementConflict: Error { case response(Data) }
+
 /// Input checks that run before any request is sent.
 public enum ManagementError: Error, Equatable {
     /// No key stored, or the last key was rejected: nothing is sent until the key changes.
@@ -259,7 +262,13 @@ public struct ManagementClient: Sendable {
 
     @discardableResult
     func send(_ method: String, _ path: String, _ body: [String: any Sendable]?, key: String,
-                      timeout: TimeInterval = 30, query: [URLQueryItem] = []) async throws -> Data {
+              timeout: TimeInterval = 30, query: [URLQueryItem] = []) async throws -> Data {
+        try await sendJSON(method, path, body, key: key, timeout: timeout, query: query)
+    }
+
+    @discardableResult
+    func sendJSON(_ method: String, _ path: String, _ body: (any Sendable)?, key: String,
+                      timeout: TimeInterval = 30, query: [URLQueryItem] = [], captureConflict: Bool = false) async throws -> Data {
         guard gate.permits(key) else { throw ManagementError.locked }
         var url = endpoint.base.appendingPathComponent(path)
         if !query.isEmpty {
@@ -275,12 +284,13 @@ public struct ManagementClient: Sendable {
         r.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         if let body {
             r.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            r.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+            r.httpBody = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys, .fragmentsAllowed])
         }
         let data: Data, resp: URLResponse
         do { (data, resp) = try await session.data(for: r) } catch { throw ProxyError.unreachable }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 || code == 403 { gate.reject(key); throw ProxyError.unauthorized }
+        if code == 409 && captureConflict { throw ManagementConflict.response(data) }
         guard (200..<300).contains(code) else { throw ProxyError.http(code) }
         return data
     }

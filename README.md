@@ -17,7 +17,7 @@ Written in Swift with SwiftUI and AppKit. No dependencies, no web views for the 
 - **Threads.** Your T3 Code threads as cards with project icon, branch, PR and provider. Subagents are listed
   under their parent, and a click opens the thread in T3 Code.
 - **Settings.** Add, rename, enable or disable, prioritize and delete accounts through the hub's own API. Also
-  quota, routing, notifications, config, logs, usage recording and hub updates.
+  quota, routing, notifications, config, plugins, logs, usage recording and hub updates.
 - **T3 Code limit bars.** It serves the endpoint T3 Code already uses on 127.0.0.1:8318, so T3 Code needs no
   extra setup.
 
@@ -81,6 +81,21 @@ Homebrew and the install script do this for you.
    and cost estimates.
 
 Settings → Getting Started shows this checklist with live check marks.
+
+### Plugins
+
+Settings → **Plugins** manages CLIProxyAPI plugins through the hub’s management API:
+
+- **Installed:** view status, enable or disable, configure declared fields, and uninstall plugins.
+- **Browse:** search the hub’s plugin store and install or update a plugin after reviewing its source and version.
+
+Changes require confirmation and affect every client using the hub. Stored plugin secrets stay hidden; leaving
+a secret unchanged keeps its existing value. Structured configuration fields are edited in the hub’s config file.
+The hub downloads and loads plugin code. If an action requires a restart, T3 Proxy tells you and leaves the
+restart to you. An action blocked by a loaded plugin must be reviewed and retried after restarting.
+
+The page requires a hub build with the Plugins and Plugin Store management APIs. Older builds show an
+unsupported message. Store authentication, when required, is configured in the hub.
 
 ## Update
 
