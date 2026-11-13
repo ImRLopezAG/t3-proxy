@@ -25,8 +25,10 @@ extension T3CodeThread {
         }
         return fallback
     }
-    /// Settlement wins over stale run, request and child-work summaries.
-    var isVisibleOnThreadBoard: Bool { !isSettled && archivedAt == nil && deletedAt == nil }
+    /// Hidden and snoozed threads stay out regardless of stale run, request or child-work summaries.
+    func isVisibleOnThreadBoard(at now: Date) -> Bool {
+        !isSettled && archivedAt == nil && deletedAt == nil && !isSnoozed(at: now)
+    }
 
     public var providerKind: T3ThreadProvider {
         T3ThreadProvider(instanceID: providerInstanceId ?? modelSelection?.instanceId ?? modelSelection?.provider)
@@ -141,8 +143,10 @@ public struct T3ThreadSection: Sendable, Equatable, Identifiable {
 struct T3ThreadFamily {
     var children: [String: [T3CodeThread]] = [:]
     var childIDs: Set<String> = []
-    init(_ snapshot: T3CodeSnapshot) {
-        let threads = snapshot.threads.filter(\.isVisibleOnThreadBoard)
+    private let snoozedIDs: Set<String>
+    init(_ snapshot: T3CodeSnapshot, now: Date) {
+        snoozedIDs = Set(snapshot.threads.filter { $0.isSnoozed(at: now) }.map(\.id))
+        let threads = snapshot.threads.filter { $0.isVisibleOnThreadBoard(at: now) }
         let byID = Dictionary(threads.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         for parent in threads {
             let linked = Set((parent.pendingBackgroundTasks ?? []).compactMap(\.childThreadId))
@@ -181,7 +185,9 @@ struct T3ThreadFamily {
     func row(_ thread: T3CodeThread, group: T3ThreadGroup, status: T3ThreadStatus, projects: [String: String]) -> T3ThreadRow {
         let children = children[thread.id, default: []]
         let mapped = Set(children.map(\.id))
-        let tasks = (thread.pendingBackgroundTasks ?? []).filter { $0.childThreadId.map { !mapped.contains($0) } ?? true }
+        let tasks = (thread.pendingBackgroundTasks ?? []).filter {
+            $0.childThreadId.map { !mapped.contains($0) && !snoozedIDs.contains($0) } ?? true
+        }
         let active = children.filter { [.running, .waiting, .needsYou].contains(attention($0)) }.count
         let missing = tasks.filter { $0.kind == "subagent" }.count
         return T3ThreadRow(thread: thread, group: group, status: status, projectTitle: projects[thread.projectId],
@@ -193,14 +199,14 @@ public enum T3ThreadBoard {
     public static let finishedWindow: TimeInterval = 24 * 3600
     public static let finishedLimit = 5
 
-    /// Groups top-level listed threads into NEEDS YOU / RUNNING / FINISHED, omitting empty groups.
+    /// Groups visible, unsnoozed top-level threads into NEEDS YOU / RUNNING / FINISHED, omitting empty groups.
     /// Limit-stopped threads appear first under FINISHED and aren't subject to the 24 h / 5-row cap.
     /// `runningSince` is a first-seen fallback for shells without usable run timestamps.
     public static func sections(_ snapshot: T3CodeSnapshot, now: Date, runningSince: [String: Date] = [:]) -> [T3ThreadSection] {
         let projects = Dictionary(snapshot.projects.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
-        let family = T3ThreadFamily(snapshot)
+        let family = T3ThreadFamily(snapshot, now: now)
         var needs: [T3ThreadRow] = [], running: [T3ThreadRow] = [], limited: [T3ThreadRow] = [], finished: [T3ThreadRow] = []
-        for t in snapshot.threads where t.isListed && !family.childIDs.contains(t.id) && t.isVisibleOnThreadBoard {
+        for t in snapshot.threads where t.isListed && !family.childIDs.contains(t.id) && t.isVisibleOnThreadBoard(at: now) {
             func row(_ g: T3ThreadGroup, _ s: T3ThreadStatus) -> T3ThreadRow {
                 var result = family.row(t, group: g, status: s, projects: projects)
                 let all = family.children[t.id, default: []].map { child in
@@ -267,10 +273,10 @@ public enum T3ThreadBoard {
     }
 
     /// Whether the menu-bar icon shows its attention dot.
-    public static func needsAttention(_ snapshot: T3CodeSnapshot?) -> Bool {
+    public static func needsAttention(_ snapshot: T3CodeSnapshot?, now: Date = .now) -> Bool {
         guard let snapshot else { return false }
-        let family = T3ThreadFamily(snapshot)
-        return snapshot.threads.contains { $0.isListed && $0.isVisibleOnThreadBoard && family.attention($0) == .needsYou }
+        let family = T3ThreadFamily(snapshot, now: now)
+        return snapshot.threads.contains { $0.isListed && $0.isVisibleOnThreadBoard(at: now) && family.attention($0) == .needsYou }
     }
 }
 
@@ -372,9 +378,9 @@ public enum T3ThreadAlertRules {
         var state = previous
         var out: [Alert] = []
         let projects = Dictionary(snapshot.projects.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
-        let family = T3ThreadFamily(snapshot)
+        let family = T3ThreadFamily(snapshot, now: now)
         var seen: [String: String] = [:]
-        for t in snapshot.threads where t.isListed && !family.childIDs.contains(t.id) && t.isVisibleOnThreadBoard {
+        for t in snapshot.threads where t.isListed && !family.childIDs.contains(t.id) && t.isVisibleOnThreadBoard(at: now) {
             let (k, kind) = key(t, family: family, now: now)
             seen[t.id] = k
             let id = "t3|\(t.id)|\(k)"

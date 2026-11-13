@@ -41,6 +41,69 @@ private func limited(_ id: String, instance: String = "codex") -> T3CodeThread {
         let s = T3ThreadBoard.sections(snap([thread("a"), thread("b", status: "completed", updated: now - 60)]), now: now)
         #expect(s.map(\.group) == [.running, .finished])
     }
+    @Test func snoozedThreadsAreExcludedFromRowsAndCount() {
+        let snooze: [String: Any] = ["snoozedUntil": iso(now + 3600)]
+        let sleeping = [
+            thread("done", status: "completed", extra: snooze),
+            thread("failed", status: "failed", extra: snooze),
+            thread("active", extra: snooze),
+            thread("question", extra: snooze.merging(["pendingRuntimeRequest": ["id": "q", "kind": "user_input"]]) { _, new in new }),
+            thread("limited", status: "failed", extra: ["snoozedUntil": iso(now + 3600), "lastErrorClass": "usage_limit",
+                "usageLimitResetAt": iso(now + 3600), "limitRecovery": ["runId": "run-limited", "resetAt": iso(now + 3600), "autoResume": true, "snooze": true]])
+        ]
+        let sections = T3ThreadBoard.sections(snap(sleeping + [thread("visible", status: "completed"), limited("awake-limit")]), now: now)
+        #expect(sections.flatMap(\.rows).map(\.id) == ["awake-limit", "visible"])
+        #expect(sections.reduce(0) { $0 + $1.rows.count } == 2)
+        #expect(T3ThreadBoard.sections(snap(sleeping), now: now).isEmpty)
+    }
+    @Test func snoozeExpirationRestoresNormalGrouping() {
+        let sleeping = thread("done", status: "completed", extra: ["snoozedUntil": iso(now + 60)])
+        #expect(T3ThreadBoard.sections(snap([sleeping]), now: now + 59).isEmpty)
+        #expect(T3ThreadBoard.sections(snap([sleeping]), now: now + 60).first?.rows.first?.id == "done")
+        #expect(T3ThreadBoard.sections(snap([sleeping]), now: now + 61).first?.group == .finished)
+    }
+    @Test func snoozedChildrenDoNotAffectParentRowsOrAttention() throws {
+        let parent = thread("parent", status: "completed")
+        let extra: [String: Any] = ["snoozedUntil": iso(now + 60),
+            "lineage": ["parentThreadId": "parent", "relationshipToParent": "subagent"]]
+        let question = thread("child", extra: extra.merging(["pendingRuntimeRequest": ["id": "q", "kind": "user_input"]]) { _, new in new })
+        let finished = thread("done-child", status: "completed", extra: extra)
+        let snapshot = snap([parent, question, finished])
+        let row = try #require(T3ThreadBoard.sections(snapshot, now: now).first?.rows.first)
+        #expect(row.id == "parent" && row.status == .done(at: now))
+        #expect(row.children.isEmpty && row.runningSubagents == 0 && row.hiddenFinishedChildren == 0)
+        #expect(!T3ThreadBoard.needsAttention(snapshot, now: now))
+        #expect(T3ThreadBoard.needsAttention(snapshot, now: now + 60))
+    }
+    @Test func snoozedRosterChildrenDoNotReappearAsMissingTasks() throws {
+        let parent = thread("parent", status: "completed", extra: ["pendingBackgroundTasks": [
+            ["taskId": "sleeping-task", "kind": "subagent", "childThreadId": "sleeping"],
+            ["taskId": "missing-task", "kind": "subagent", "childThreadId": "missing"],
+            ["taskId": "build", "kind": "command"]]])
+        let sleeping = thread("sleeping", extra: ["snoozedUntil": iso(now + 60)])
+        let snapshot = snap([parent, sleeping])
+        let row = try #require(T3ThreadBoard.sections(snapshot, now: now).first?.rows.first)
+        #expect(row.children.isEmpty)
+        #expect(row.backgroundTasks.map(\.taskId) == ["missing-task", "build"])
+        #expect(row.runningSubagents == 1)
+        let awake = try #require(T3ThreadBoard.sections(snapshot, now: now + 60).first?.rows.first)
+        #expect(awake.children.map(\.id) == ["sleeping"])
+        #expect(awake.backgroundTasks.map(\.taskId) == ["missing-task", "build"])
+        #expect(awake.runningSubagents == 2)
+    }
+    @Test func snoozedThreadsDoNotTriggerAttentionOrCompletionAlerts() {
+        var all = AlertSettings(); for kind in AlertKind.t3CodeKinds { all.set(kind, on: true) }
+        let (_, seeded) = T3ThreadAlertRules.evaluate(.init(), snap([thread("a")]), settings: all, now: now)
+        let variants: [(String, [String: Any])] = [("completed", [:]), ("failed", ["lastErrorClass": "usage_limit"]),
+            ("running", ["pendingRuntimeRequest": ["id": "q", "kind": "user_input"]])]
+        for (status, variant) in variants {
+            let sleeping = thread("a", status: status, extra: variant.merging(["snoozedUntil": iso(now + 60)]) { _, new in new })
+            let snapshot = snap([sleeping])
+            #expect(!T3ThreadBoard.needsAttention(snapshot, now: now))
+            let (alerts, _) = T3ThreadAlertRules.evaluate(seeded, snapshot, settings: all, now: now)
+            #expect(alerts.isEmpty)
+        }
+    }
     @Test func needsYouKinds() {
         let q = thread("q", extra: ["pendingRuntimeRequest": ["id": "r1", "kind": "user_input"]])
         let a = thread("a", extra: ["pendingRuntimeRequest": ["id": "r2", "kind": "command", "createdAt": iso(now - 300)]])
