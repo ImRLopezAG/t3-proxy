@@ -126,7 +126,7 @@ struct ThreadHoverCard: View {
         case .running: .green
         case .failed: .red
         case .waiting: .blue
-        case .limit, .done: .secondary
+        case .limit, .done, .snoozed: .secondary
         }
     }
 

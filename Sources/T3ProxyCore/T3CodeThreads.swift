@@ -25,9 +25,10 @@ extension T3CodeThread {
         }
         return fallback
     }
-    /// Hidden and snoozed threads stay out regardless of stale run, request or child-work summaries.
+    var isAvailableOnThreadBoard: Bool { !isSettled && archivedAt == nil && deletedAt == nil }
+    /// Snoozed threads stay out of active/finished rows, attention and alerts despite stale summaries.
     func isVisibleOnThreadBoard(at now: Date) -> Bool {
-        !isSettled && archivedAt == nil && deletedAt == nil && !isSnoozed(at: now)
+        isAvailableOnThreadBoard && !isSnoozed(at: now)
     }
 
     public var providerKind: T3ThreadProvider {
@@ -39,13 +40,14 @@ extension T3CodeThread {
     public var limitResetAt: Date? { usageLimitResetAt ?? limitRecovery?.resetAt }
 }
 
-public enum T3ThreadGroup: String, Sendable, CaseIterable { case needsYou = "NEEDS YOU", running = "RUNNING", finished = "FINISHED" }
+public enum T3ThreadGroup: String, Sendable, CaseIterable { case needsYou = "NEEDS YOU", running = "RUNNING", snoozed = "SNOOZED", finished = "FINISHED" }
 
 public enum T3ThreadStatus: Sendable, Equatable {
     case needsYou(kind: String, since: Date?)
     case running(since: Date?)
     case waiting(since: Date?)
     case limit(resumesAt: Date?, autoResume: Bool = false)
+    case snoozed(until: Date)
     case done(at: Date?)
     case failed(at: Date?)
 
@@ -56,6 +58,7 @@ public enum T3ThreadStatus: Sendable, Equatable {
         case .running: "Running"
         case .waiting: "Waiting"
         case .limit: "Limit"
+        case .snoozed: "Snoozed"
         case .done: "Done"
         case .failed: "Failed"
         }
@@ -64,15 +67,19 @@ public enum T3ThreadStatus: Sendable, Equatable {
     /// The secondary detail: age, elapsed time, resume time, or relative finish time.
     public func detail(now: Date, calendar: Calendar = .current, locale: Locale = .current) -> String? {
         switch self {
-        case .needsYou(_, let since): since.map { T3ThreadStatus.age(from: $0, to: now) }
-        case .running(let since), .waiting(let since): since.map { T3ThreadStatus.elapsed(from: $0, to: now) }
+        case .needsYou(_, let since): return since.map { T3ThreadStatus.age(from: $0, to: now) }
+        case .running(let since), .waiting(let since): return since.map { T3ThreadStatus.elapsed(from: $0, to: now) }
         case .limit(let at, let autoResume):
-            at.map { d in
+            return at.map { d in
                 let f = DateFormatter(); f.locale = locale; f.calendar = calendar; f.timeZone = calendar.timeZone
                 f.setLocalizedDateFormatFromTemplate(calendar.isDate(d, inSameDayAs: now) ? "jmm" : "EEEjmm")
                 return "\(autoResume ? "resumes" : "limit resets") \(f.string(from: d))"
             }
-        case .done(let at), .failed(let at): at.map { now.timeIntervalSince($0) < 60 ? "just now" : T3ThreadStatus.age(from: $0, to: now) + " ago" }
+        case .snoozed(let until):
+            let f = DateFormatter(); f.locale = locale; f.calendar = calendar; f.timeZone = calendar.timeZone
+            f.setLocalizedDateFormatFromTemplate(calendar.isDate(until, inSameDayAs: now) ? "jmm" : "MMM d jmm")
+            return "until \(f.string(from: until))"
+        case .done(let at), .failed(let at): return at.map { now.timeIntervalSince($0) < 60 ? "just now" : T3ThreadStatus.age(from: $0, to: now) + " ago" }
         }
     }
 
@@ -129,7 +136,10 @@ public struct T3ThreadRow: Sendable, Equatable, Identifiable {
         if let moreChildrenLabel { parts.append(moreChildrenLabel) }
         return parts.joined(separator: " · ")
     }
-    public var canStop: Bool { thread.activeRunId != nil && (thread.attention == .running || thread.attention == .waiting) }
+    public var canStop: Bool {
+        if case .snoozed = status { return false }
+        return thread.activeRunId != nil && (thread.attention == .running || thread.attention == .waiting)
+    }
     public var canResume: Bool { if case .limit = status { return thread.isUsageLimited && thread.activeRunId == nil } else { return false } }
 }
 
@@ -148,10 +158,18 @@ struct T3ThreadFamily {
         snoozedIDs = Set(snapshot.threads.filter { $0.isSnoozed(at: now) }.map(\.id))
         let threads = snapshot.threads.filter { $0.isVisibleOnThreadBoard(at: now) }
         let byID = Dictionary(threads.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        for parent in threads {
+        var parentOf: [String: String] = [:]
+        // Snoozing a parent must not turn its sleeping roster children into independent threads.
+        // Keep these links for cycle detection, without aggregating their activity or rendering them.
+        for parent in snapshot.threads.filter(\.isAvailableOnThreadBoard).sorted(by: { $0.id < $1.id }) {
             let linked = Set((parent.pendingBackgroundTasks ?? []).compactMap(\.childThreadId))
             for id in linked where id != parent.id {
-                if let child = byID[id] { children[parent.id, default: []].append(child); childIDs.insert(id) }
+                if snoozedIDs.contains(id) {
+                    childIDs.insert(id)
+                    if parentOf[id] == nil { parentOf[id] = parent.id }
+                } else if !parent.isSnoozed(at: now), let child = byID[id] {
+                    children[parent.id, default: []].append(child); childIDs.insert(id)
+                }
             }
         }
         for child in threads where child.lineage?.relationshipToParent == "subagent" {
@@ -161,7 +179,6 @@ struct T3ThreadFamily {
         }
         // A cycle (A lists B and B lists A) would make every member a child and hide the whole family.
         // Break each cycle at its smallest id, which stays visible as the root.
-        var parentOf: [String: String] = [:]
         for (parent, kids) in children.sorted(by: { $0.key < $1.key }) { for k in kids where parentOf[k.id] == nil { parentOf[k.id] = parent } }
         for start in childIDs.sorted() where childIDs.contains(start) {
             var path: [String] = [], at: String? = start
@@ -199,14 +216,19 @@ public enum T3ThreadBoard {
     public static let finishedWindow: TimeInterval = 24 * 3600
     public static let finishedLimit = 5
 
-    /// Groups visible, unsnoozed top-level threads into NEEDS YOU / RUNNING / FINISHED, omitting empty groups.
+    /// Groups top-level threads into NEEDS YOU / RUNNING / SNOOZED / FINISHED, omitting empty groups.
     /// Limit-stopped threads appear first under FINISHED and aren't subject to the 24 h / 5-row cap.
     /// `runningSince` is a first-seen fallback for shells without usable run timestamps.
     public static func sections(_ snapshot: T3CodeSnapshot, now: Date, runningSince: [String: Date] = [:]) -> [T3ThreadSection] {
         let projects = Dictionary(snapshot.projects.map { ($0.id, $0.title) }, uniquingKeysWith: { a, _ in a })
         let family = T3ThreadFamily(snapshot, now: now)
-        var needs: [T3ThreadRow] = [], running: [T3ThreadRow] = [], limited: [T3ThreadRow] = [], finished: [T3ThreadRow] = []
-        for t in snapshot.threads where t.isListed && !family.childIDs.contains(t.id) && t.isVisibleOnThreadBoard(at: now) {
+        var needs: [T3ThreadRow] = [], running: [T3ThreadRow] = [], snoozed: [T3ThreadRow] = [], limited: [T3ThreadRow] = [], finished: [T3ThreadRow] = []
+        for t in snapshot.threads where t.isListed && !family.childIDs.contains(t.id) && t.isAvailableOnThreadBoard {
+            if t.isSnoozed(at: now), let until = t.snoozedUntil {
+                snoozed.append(T3ThreadRow(thread: t, group: .snoozed, status: .snoozed(until: until),
+                    projectTitle: projects[t.projectId], model: t.modelSelection?.model, runningSubagents: 0))
+                continue
+            }
             func row(_ g: T3ThreadGroup, _ s: T3ThreadStatus) -> T3ThreadRow {
                 var result = family.row(t, group: g, status: s, projects: projects)
                 let all = family.children[t.id, default: []].map { child in
@@ -253,9 +275,13 @@ public enum T3ThreadBoard {
             return x == y ? a.id < b.id : x > y
         }
         needs.sort(by: newest); running.sort(by: newest); limited.sort(by: newest); finished.sort(by: newest)
+        snoozed.sort { a, b in
+            let x = a.thread.snoozedUntil ?? .distantFuture, y = b.thread.snoozedUntil ?? .distantFuture
+            return x == y ? a.id < b.id : x < y
+        }
         let done = limited + finished.prefix(finishedLimit)
         return [T3ThreadSection(group: .needsYou, rows: needs), T3ThreadSection(group: .running, rows: running),
-                T3ThreadSection(group: .finished, rows: done)].filter { !$0.rows.isEmpty }
+                T3ThreadSection(group: .snoozed, rows: snoozed), T3ThreadSection(group: .finished, rows: done)].filter { !$0.rows.isEmpty }
     }
 
     /// "2 need you · 2 running"; "No active threads" when both are zero.
