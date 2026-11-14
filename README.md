@@ -104,11 +104,14 @@ Settings → **Connectors** manages existing MCP servers. Add a connection once,
 each account or workspace, including multiple accounts at the same MCP URL. T3 Proxy does not build
 service integrations or import ChatGPT/Claude web connections.
 
-**Add MCP Connection** opens a searchable quick-connect list for Linear, Notion, GitHub, Neon, Vercel,
+**Add MCP Connection** opens a searchable quick-connect list for Gmail via Pipedream, Linear, Notion, GitHub, Neon, Vercel,
 WorkOS and Firecrawl. Choose a service to fill in its official server details, name the connection and
 choose its clients. OAuth services use **Sign In** after adding; GitHub uses an access token stored in
-Keychain. **Custom MCP…** keeps manual remote and local server setup available, including Gmail and
-project-specific servers. Each addition can use a different account or workspace.
+Keychain. The Gmail option uses Pipedream's hosted MCP service: sign in to Pipedream, select Gmail,
+and authorize the intended Google account. It does not require your own Google Cloud OAuth client.
+Pipedream handles the service connection; available tools and account selection depend on its consent flow.
+**Custom MCP…** keeps manual remote and local server setup available, including alternative Gmail
+servers and project-specific servers. Each addition has its own local connection identity.
 
 Settings → **Getting Started** → **Set Up T3 Proxy** creates missing isolated profiles and customization links, registers the two proxy
 providers in T3 Code, and synchronizes managed MCP entries. Existing inference configuration, MCP servers,

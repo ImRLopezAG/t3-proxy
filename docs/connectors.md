@@ -33,6 +33,7 @@ Provider definitions checked against these first-party sources on 2026-11-14:
 
 | Service | Endpoint | Authentication | Source |
 | --- | --- | --- | --- |
+| Gmail via Pipedream | `https://mcp.pipedream.net/v2` | OAuth | [Pipedream Gmail](https://mcp.pipedream.com/app/gmail), [MCP setup](https://pipedream.com/docs/connect/mcp/users) |
 | Linear | `https://mcp.linear.app/mcp` | OAuth | [Linear](https://linear.app/docs/mcp) |
 | Notion | `https://mcp.notion.com/mcp` | OAuth | [Notion](https://developers.notion.com/docs/get-started-with-mcp) |
 | GitHub | `https://api.githubcopilot.com/mcp/` | Bearer token | [GitHub hosted server](https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md), [authentication](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md) |
@@ -44,8 +45,17 @@ Provider definitions checked against these first-party sources on 2026-11-14:
 GitHub accepts personal access tokens; browser OAuth requires a registered client, which this manager
 does not supply. Choose token permissions appropriate to the repositories you want to access. The
 Firecrawl preset uses its OAuth endpoint; API keys are never placed in URLs. Convex's documented MCP
-uses a local CLI and project directory, so it remains available through Custom MCP. Gmail also needs
-an existing MCP server selected by the user; a ChatGPT/Claude Gmail web connection is not a server URL.
+uses a local CLI and project directory, so it remains available through Custom MCP.
+
+The Gmail preset is explicitly hosted by Pipedream, an external service. Pipedream documents a shared
+MCP endpoint and browser flow: sign in or create a Pipedream MCP account, select the apps to enable,
+then authorize access. Choose Gmail and the intended Google account in that flow. This uses the existing
+MCP service rather than a T3-built Gmail integration and does not require your own Google Cloud OAuth
+client. The shared endpoint can expose other apps you authorize; the preset does not filter its tools
+to Gmail. Separate T3 connection UUIDs isolate local grants, but do not prove separate upstream Gmail
+account selection. Verify the returned identity and actual tools for each connection before using it.
+Pipedream's account requirements, terms and permissions apply. Alternative Gmail MCP servers remain
+available through Custom MCP; a ChatGPT/Claude Gmail web connection is not a server URL.
 
 This catalog verifies provider documentation, not live account access. Endpoints, client registration
 requirements and tool availability can change. Successful sign-in, discovery and authorized tool calls

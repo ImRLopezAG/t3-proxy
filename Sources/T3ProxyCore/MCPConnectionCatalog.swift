@@ -19,6 +19,10 @@ public struct MCPConnectionPreset: Identifiable, Sendable {
 public enum MCPConnectionCatalog {
     // Provider documentation checked 2026-11-14. See docs/connectors.md for sources and verification limits.
     public static let presets: [MCPConnectionPreset] = [
+        .init(id: "gmail-pipedream", name: "Gmail via Pipedream",
+              summary: "Hosted by Pipedream; choose Gmail during browser sign-in",
+              endpoint: "https://mcp.pipedream.net/v2", authentication: .oauth,
+              documentation: "https://mcp.pipedream.com/app/gmail"),
         .init(id: "linear", name: "Linear", summary: "Issues, projects and teams",
               endpoint: "https://mcp.linear.app/mcp", authentication: .oauth,
               documentation: "https://linear.app/docs/mcp"),
