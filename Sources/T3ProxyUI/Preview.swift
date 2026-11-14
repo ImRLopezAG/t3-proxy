@@ -104,6 +104,32 @@ public enum SamplePreview {
         }
     }
 
+    @MainActor public static func renderQuotaStress(to dir: URL) throws {
+        let now = Date()
+        let accounts = (0..<40).map { i -> Account in
+            var account = Account(name: "sample-subscription-\(i)", provider: i < 20 ? .codex : .claude)
+            account.nickname = "Subscription \(i + 1)"
+            account.quota = QuotaReading(observedAt: now, windows: [
+                QuotaWindow(id: "five-hour", label: "5-hour session", usedPercent: Double((i * 13) % 101), resetAt: now.addingTimeInterval(7200)),
+                QuotaWindow(id: "weekly", label: "Weekly", usedPercent: Double((i * 37) % 101), resetAt: now.addingTimeInterval(172800))
+            ], models: [:], plan: nil)
+            return account
+        }
+        for width in [540.0, 1040.0] {
+            let view = VStack(alignment: .leading, spacing: 16) {
+                Text("SAMPLE DATA · NOT LIVE · 40 SUBSCRIPTIONS").font(.system(size: 12, weight: .bold)).foregroundStyle(.red)
+                QuotaDashboard(accounts: accounts, endpoint: "sample", now: now, sample: true)
+            }
+            .padding(20).frame(width: width).fixedSize(horizontal: false, vertical: true)
+            .background(Color(hex: 0x202020)).environment(\.colorScheme, .dark)
+            let renderer = ImageRenderer(content: view); renderer.scale = 1
+            guard let cg = renderer.cgImage,
+                  let data = NSBitmapImageRep(cgImage: cg).representation(using: .png, properties: [:])
+            else { throw CocoaError(.fileWriteUnknown) }
+            try data.write(to: dir.appendingPathComponent("quota-40-\(Int(width)).png"))
+        }
+    }
+
     /// Deterministic sample breakdown (rendered only in design stills).
     static func sampleSummary(seed: Int, provider: Provider) -> AccountUsageSummary {
         let cal = Calendar.current, today = cal.startOfDay(for: Date())

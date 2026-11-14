@@ -283,6 +283,7 @@ if let i = args.firstIndex(of: "--render-preview"), i + 1 < args.count {
         } }
         // Honest state for what a user without a key sees.
         try! SamplePreview.renderCards(to: dir)
+        try! SamplePreview.renderQuotaStress(to: dir)
         try! SamplePreview.renderThreads(to: dir)
         let empty = PanelContent(reachability: .live, management: .noKey, endpoint: ProxyEndpoint.configured().label, accounts: [], updatedAt: nil)
         try! SamplePreview.render(empty, tab: .overview, dark: true, to: dir.appendingPathComponent("nokey-dark.png"))

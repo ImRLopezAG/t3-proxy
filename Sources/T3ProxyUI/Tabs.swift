@@ -157,31 +157,35 @@ struct OverviewTab: View {
 }
 struct ActiveTab: View {
     let c: PanelContent
-    @Environment(\.colorScheme) private var s
     var body: some View {
-        // Held accounts (disabled, erroring) stay in the list, after the active ones, with the reason.
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            content(now: context.date)
+        }
+    }
+
+    private func content(now: Date) -> some View {
         let list = c.accounts.filter { !$0.held } + c.accounts.filter(\.held)
-        VStack(alignment: .leading, spacing: 0) {
+        return VStack(alignment: .leading, spacing: 0) {
             HStack { SectionTitle(text: "Accounts"); Spacer(); Pill(text: c.held > 0 ? "\(c.active) active · \(c.held) held" : "\(list.count)") }.padding(.vertical, 8)
             if !c.hasAccounts { Note(text: accountsHint(c)).padding(.bottom, 4) }
             else if list.isEmpty { Note(text: "No accounts.") }
-            let now = Date()
             let rows = VStack(spacing: 0) {
                 ForEach(list) { a in
-                    AccountRow(account: a, now: now, sample: c.isSample, heldLine: heldLine(a))
+                    AccountRow(account: a, now: now, sample: c.isSample, heldLine: heldLine(a, now: now),
+                               endpoint: c.endpoint, connected: c.management == .connected)
                     if a != list.last { Rule() }
                 }
             }
             // ImageRenderer cannot draw a ScrollView; sample stills lay the rows out directly.
             if c.isSample { rows } else {
                 ScrollView { rows.overlayScroller() }
-                    .frame(maxHeight: 420).fixedSize(horizontal: false, vertical: true)
+                    .frame(maxHeight: min(420, (NSScreen.main?.visibleFrame.height ?? 800) - 210)).fixedSize(horizontal: false, vertical: true)
             }
         }
     }
-    private func heldLine(_ a: Account) -> String {
+    private func heldLine(_ a: Account, now: Date) -> String {
         var s = a.heldReason ?? "Held"
-        if let r = a.releaseAt, r > Date() { s += " · back in \(shortDuration(until: r))" }
+        if let r = a.releaseAt, r > now { s += " · back in \(shortDuration(until: r, from: now))" }
         return s
     }
 }
@@ -193,6 +197,8 @@ struct AccountRow: View {
     let now: Date
     let sample: Bool
     let heldLine: String
+    let endpoint: String
+    let connected: Bool
     @Environment(\.colorScheme) private var s
 
     var body: some View {
@@ -211,6 +217,11 @@ struct AccountRow: View {
                     Text(a.name.emailHidden).font(.system(size: 9.5)).foregroundStyle(t.secondary).lineLimit(1).truncationMode(.middle)
                 }
                 Spacer(minLength: 0)
+                if !sample, let live = LiveQuotaModel.primary {
+                    HStack(spacing: 4) {
+                        QuotaResetControls(account: a, live: live, now: now, compact: true, connected: connected)
+                    }
+                }
             }
             if a.provider == .other {
                 Text("No quota data").font(.system(size: 10)).foregroundStyle(t.secondary)
@@ -223,78 +234,14 @@ struct AccountRow: View {
                 Label("\(u.window.title): \(p.summary)" + (p.projection(now: now).map { " · \($0)" } ?? ""), systemImage: "exclamationmark.triangle.fill")
                     .font(.system(size: 9.5)).foregroundStyle(.orange).lineLimit(1)
             }
-            if a.provider == .codex, !a.disabled, !sample, let live = LiveQuotaModel.primary {
-                PanelResetButton(account: a, live: live)
-            }
         }
         .opacity(a.disabled ? 0.6 : 1)
         .padding(.vertical, 7)
         .contentShape(Rectangle())
         // Sample stills skip the hover sensor: ImageRenderer can't draw AppKit views.
-        .hoverCard(enabled: !sample) {
-            AccountHoverCard(account: a, tint: Theme(s).tint(a.provider), now: Date(), sample: sample).id(a.id)
-        }
-    }
-}
-
-/// "Use Reset…" for a nearly exhausted Codex account with a banked reset, or "Retry Reset…" for an unfinished one.
-///
-/// The panel is a non-activating NSPanel, where a SwiftUI confirmationDialog/alert may never present (it needs a
-/// key, activating window). The confirmation is an NSAlert run app-modally instead: `runModal()` creates its own
-/// window and doesn't depend on the panel. The app is activated first so the alert comes up frontmost and takes
-/// keyboard focus. The panel closes when the alert takes key (AppDelegate.windowDidResignKey); that's fine, since
-/// the alert, the captured intent and LiveQuotaModel don't depend on it. The outcome also shows in Settings → Quota.
-struct PanelResetButton: View {
-    let account: Account
-    @ObservedObject var live: LiveQuotaModel
-    @State private var showOutcome = false
-
-    var body: some View {
-        let pending = live.pending[account.id] != nil
-        let low = QuotaWindowKind.allCases.contains { (account.quota.remaining($0, at: Date()) ?? 101) <= 5 }
-        let banked = live.credits[account.id]?.isEmpty == false
-        VStack(alignment: .leading, spacing: 2) {
-            if live.claiming == account.id {
-                ProgressView().controlSize(.mini)
-            } else if pending || (banked && low) {
-                Button(pending ? "Retry Reset…" : "Use Reset…") { confirm(pending: pending) }
-                    .buttonStyle(.bordered).controlSize(.mini).font(.system(size: 9.5))
-                    .disabled(live.claiming != nil)
-            }
-            if showOutcome, let o = live.outcome, o.accountID == account.id {
-                Text(o.text).font(.system(size: 9.5)).foregroundStyle(o.isError ? .orange : .green)
-                    .lineLimit(3).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .task(id: live.outcome) {
-            guard live.outcome?.accountID == account.id else { showOutcome = false; return }
-            showOutcome = true
-            try? await Task.sleep(for: .seconds(8))
-            showOutcome = false
-        }
-    }
-
-    private func confirm(pending: Bool) {
-        // Capture exactly what the dialog describes; useReset re-checks it against the current state.
-        guard let intent = live.intent(for: account) else { return }
-        let name = live.label(for: account)
-        let credit = live.pending[account.id]?.credit ?? live.credits[account.id]?.first
-        let expiry = credit?.expiresAt.map { " (the one expiring \($0.formatted(date: .abbreviated, time: .shortened)))" } ?? ""
-        let live = self.live
-        // Leave the button action first, so the modal loop doesn't run inside SwiftUI's event handling.
-        DispatchQueue.main.async {
-            let alert = NSAlert()
-            alert.alertStyle = .warning
-            alert.messageText = pending ? "Retry the reset on “\(name)”?" : "Use a reset on “\(name)”?"
-            alert.informativeText = pending
-                ? "Sends the same reset request again. If the first one went through, no second credit is spent."
-                : "Its 5-hour and weekly Codex limits start over right away. This spends one banked reset\(expiry) and can't be undone."
-            alert.addButton(withTitle: pending ? "Retry Reset" : "Use Reset")
-            alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
-            NSApp.activate()
-            alert.window.level = .popUpMenu   // above the status-bar-level panel
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
-            Task { @MainActor in await live.useReset(intent) }
+        .hoverCard(enabled: !sample, interactive: true, clickToOpen: true) {
+            QuotaAccountDetails(account: a, label: a.quotaLabel, endpoint: endpoint,
+                                live: LiveQuotaModel.primary, connected: connected).id(a.id)
         }
     }
 }
