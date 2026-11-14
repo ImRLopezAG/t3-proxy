@@ -18,7 +18,7 @@ public enum ManagementError: Error, Equatable {
     case runtimeOnly
 }
 
-public enum CredentialStatus: String, Sendable, Equatable { case healthy, cooling, disabled, error }
+public enum CredentialStatus: String, Sendable, Equatable { case healthy, limited, cooling, disabled, error }
 
 /// One `/v8/management/credentials` entry, reduced to what the Accounts pane shows.
 public struct Credential: Sendable, Identifiable, Equatable {
@@ -158,11 +158,13 @@ extension Credential {
         let raw = (e.provider ?? e.type ?? "unknown").lowercased()
         let st = (e.status ?? "").lowercased()
         let message = e.status_message?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let note = message.flatMap { $0.isEmpty ? nil : classifyHubMessage($0) }
+        let issue = HubMessageKind(message)
+        let note = message.flatMap { $0.isEmpty ? nil : issue.rawValue }
         let retry = (e.cooldowns ?? []).filter { $0.scope == "model" || $0.scope == "credential" }
             .compactMap { $0.retry_at.flatMap(Account.parseDate) }.min()
         let status: CredentialStatus, reason: String?
         if e.disabled == true || st == "disabled" { status = .disabled; reason = "Disabled in the hub" }
+        else if (st == "error" || e.unavailable == true) && issue == .rateLimit { status = .limited; reason = issue.rawValue }
         else if st == "error" { status = .error; reason = note ?? "Error" }
         else if e.unavailable == true { status = .error; reason = note ?? "Paused by the hub" }
         else if retry != nil { status = .cooling; reason = "Cooling down after recent errors" }

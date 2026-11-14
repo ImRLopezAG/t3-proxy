@@ -17,13 +17,27 @@ public final class AuthGate: @unchecked Sendable {
 /// Hub status text can quote upstream errors (headers, token-bearing URLs), so only a fixed
 /// category is shown, as Proxy Deck's classifyHubMessage() does.
 public func classifyHubMessage(_ raw: String?) -> String {
-    let m = raw ?? ""
-    func has(_ p: String) -> Bool { m.range(of: p, options: [.regularExpression, .caseInsensitive]) != nil }
-    if has(#"\b401\b|unauthori[sz]ed|invalid_grant|expired|revoked|refresh"#) { return "Sign-in expired or was revoked" }
-    if has(#"\b429\b|rate.?limit|usage limit|quota"#) { return "Rate limited by the provider" }
-    if has(#"timeout|timed out|deadline"#) { return "Provider requests timed out" }
-    if has(#"\b5\d\d\b|overloaded|service unavailable"#) { return "Provider server error" }
-    return "The hub reported an error"
+    HubMessageKind(raw).rawValue
+}
+
+/// Fixed categories let status classification share the same sanitization as displayed reasons.
+enum HubMessageKind: String {
+    case signIn = "Sign-in expired or was revoked"
+    case rateLimit = "Rate limited by the provider"
+    case timeout = "Provider requests timed out"
+    case server = "Provider server error"
+    case other = "The hub reported an error"
+
+    init(_ raw: String?) {
+        let m = raw ?? ""
+        func has(_ p: String) -> Bool { m.range(of: p, options: [.regularExpression, .caseInsensitive]) != nil }
+        if has(#"\b401\b|unauthori[sz]ed|invalid_grant|expired|revoked|refresh"#) { self = .signIn }
+        else if has(#"\b429\b"#) { self = .rateLimit }
+        else if has(#"timeout|timed out|deadline"#) { self = .timeout }
+        else if has(#"\b5\d\d\b|overloaded|service unavailable"#) { self = .server }
+        else if has(#"rate.?limit|usage[ _-]?limit|quota.{0,24}(?:exceed|exhaust|reached)|(?:exceed|exhaust).{0,24}quota|insufficient[_ -]quota"#) { self = .rateLimit }
+        else { self = .other }
+    }
 }
 
 public enum Provider: String, Sendable, CaseIterable { case claude, codex, other

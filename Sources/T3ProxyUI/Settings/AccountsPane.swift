@@ -170,8 +170,7 @@ struct StatusLabel: View {
     let c: Credential
     var quota: QuotaReading? = nil
 
-    /// Hub state first (disabled, error, cooling); a healthy account whose recorded limit is used up
-    /// is "Limited" until that window resets, and under 10% left is "Near limit".
+    /// Genuine hub failures stay errors; provider quota responses and exhausted readings are "Limited".
     var body: some View {
         let now = Date()
         let windows = QuotaWindowKind.allCases.compactMap { k in quota?.remaining(k, at: now).map { (k, $0) } }
@@ -182,10 +181,15 @@ struct StatusLabel: View {
             case .disabled: return ("Disabled", "pause.circle.fill", .secondary, nil, c.reason ?? "Disabled")
             case .error: return ("Error", "exclamationmark.triangle.fill", .red, nil, c.reason ?? "Error")
             case .cooling: return ("Cooling", "clock.fill", .orange, c.retryAt.map { "until \($0.formatted(date: .omitted, time: .shortened))" }, c.reason ?? "Cooling")
-            case .healthy:
+            case .healthy, .limited:
                 if let (k, r) = low, r <= 0 {
                     return ("Limited", "hourglass", .orange, reset.map { "resets \(shortDuration(until: $0, from: now))" },
                             "\(k.title) limit reached; the hub routes to other accounts until it resets.")
+                }
+                if c.status == .limited {
+                    let retry = c.retryAt.flatMap { $0 > now ? $0 : nil }
+                    return ("Limited", "hourglass", .orange, retry.map { "retry in \(shortDuration(until: $0, from: now))" },
+                            c.reason ?? "Rate limited by the provider")
                 }
                 if let (k, r) = low, r < 10 {
                     return ("Near limit", "gauge.with.dots.needle.67percent", .yellow, "\(k == .session ? "5-hour" : "weekly") \(Int(r.rounded()))% left",
