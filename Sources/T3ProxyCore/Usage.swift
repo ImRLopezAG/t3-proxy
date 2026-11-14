@@ -1,5 +1,6 @@
 import Foundation
 import SQLite3
+import Darwin
 
 /// Token sums for one group of requests.
 public struct UsageTotals: Sendable, Equatable {
@@ -416,9 +417,14 @@ final class UsageSnapshots: @unchecked Sendable {
     static let sizeLimit: UInt64 = 512 * 1024 * 1024
     init(root: URL = FileManager.default.temporaryDirectory, now: @escaping @Sendable () -> Date = { Date() }) {
         self.root = root; self.now = now
-        // Initialized when UsageModel creates its first source at launch. Remove abandoned copies.
+        // Remove abandoned copies, preserving snapshots leased by another app or test process.
         for directory in (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
             where directory.lastPathComponent.hasPrefix("T3Proxy-usage-") {
+            let owner = directory.lastPathComponent.dropFirst("T3Proxy-usage-".count).split(separator: "-").first
+            if let owner, let pid = pid_t(owner), pid > 0 {
+                // Only ESRCH proves the owner is gone; permission errors do not.
+                if Darwin.kill(pid, 0) == 0 || errno != ESRCH { continue }
+            }
             try? FileManager.default.removeItem(at: directory)
         }
     }
@@ -444,10 +450,12 @@ final class UsageSnapshots: @unchecked Sendable {
             }
             let date = now()
             // Refresh only after BOTH 30 seconds have elapsed and the source changed.
-            if !fresh, let entry = entries[path], date.timeIntervalSince(entry.created) < 30 || entry.stamps == stamps {
+            if !fresh, let entry = entries[path],
+               FileManager.default.isReadableFile(atPath: entry.snapshot.file.path),
+               date.timeIntervalSince(entry.created) < 30 || entry.stamps == stamps {
                 return entry.snapshot
             }
-            let directory = root.appendingPathComponent("T3Proxy-usage-" + UUID().uuidString)
+            let directory = root.appendingPathComponent("T3Proxy-usage-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString)")
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
                                                     attributes: [.posixPermissions: 0o700])
             let snapshot = UsageSnapshot(directory: directory)
