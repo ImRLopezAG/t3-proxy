@@ -192,6 +192,9 @@ private func mutate<T: Sendable>(_ action: @escaping @Sendable () throws -> T) a
 private struct AddMCPConnection: View {
     let saved: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var choosing = true
+    @State private var search = ""
+    @State private var preset: MCPConnectionPreset?
     @State private var provider = ServiceProvider.remoteMCP
     @State private var authentication = MCPAuthentication.oauth
     @State private var name = ""
@@ -206,12 +209,67 @@ private struct AddMCPConnection: View {
     @State private var busy = false
     @State private var error: String?
     private struct CredentialField: Identifiable { let id = UUID(); var name = ""; var value = "" }
+    private var matchingPresets: [MCPConnectionPreset] {
+        MCPConnectionCatalog.presets.filter { search.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(search) }
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Add MCP Connection").font(.title2).fontWeight(.semibold)
-            Form {
-                TextField("Connection name", text: $name, prompt: Text("Work Gmail, Personal GitHub…"))
-                TextField("Account / workspace / project", text: $workspace)
+            Text(choosing ? "Quick Connections" : preset?.name ?? "Custom MCP Connection").font(.title2).fontWeight(.semibold)
+            if choosing {
+                Text("Choose a service, then connect the account you want to share.").foregroundStyle(.secondary)
+                TextField("Search services", text: $search).textFieldStyle(.roundedBorder)
+                List {
+                    ForEach(matchingPresets) { item in
+                        Button { choose(item) } label: {
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.name).fontWeight(.medium)
+                                    Text(item.summary).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(item.authentication == .oauth ? "Browser sign-in" : "Access token").font(.caption).foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                            }.padding(.vertical, 7).contentShape(Rectangle())
+                        }.buttonStyle(.plain).accessibilityLabel("Choose \(item.name)")
+                    }
+                }.listStyle(.inset)
+                if matchingPresets.isEmpty {
+                    Text("No matching service. Use Custom MCP for another server.").font(.callout).foregroundStyle(.secondary)
+                }
+            } else {
+                configuration
+            }
+            if let error { Text(error).font(.callout).foregroundStyle(.orange) }
+            HStack {
+                if choosing {
+                    Button("Custom MCP…") { choose(nil) }
+                } else {
+                    Button("All Services") { token = ""; environment = []; error = nil; choosing = true }.disabled(busy)
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(busy)
+                if !choosing {
+                    Button("Add Connection") { add() }.buttonStyle(.borderedProminent)
+                        .disabled(busy || name.trimmingCharacters(in: .whitespaces).isEmpty || (!codex && !claude) || (provider == .remoteMCP ? !ServiceConnection.validEndpoint(endpoint) || (authentication == .bearer && token.isEmpty) : command.isEmpty))
+                }
+            }
+        }.padding(24).frame(width: 620, height: 600)
+    }
+    private var configuration: some View {
+        Form {
+            TextField("Connection name", text: $name, prompt: Text("Work Gmail, Personal GitHub…"))
+            TextField("Account / workspace / project", text: $workspace)
+            if let preset {
+                Text(preset.summary).foregroundStyle(.secondary)
+                LabeledContent("Server") { Text(preset.endpoint).font(.caption).textSelection(.enabled) }
+                if let url = URL(string: preset.documentation) { Link("Service setup guide", destination: url) }
+                if authentication == .oauth {
+                    Text("After adding, choose Sign In to authorize this account in your browser. Available tools depend on your account permissions.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    SecureField("GitHub access token", text: $token)
+                    Text("Use a token with the repository permissions you need. It is stored in Keychain. GitHub browser sign-in requires a registered OAuth client.").font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
                 Picker("Transport", selection: $provider) { Text("Remote HTTP").tag(ServiceProvider.remoteMCP); Text("Local stdio").tag(ServiceProvider.stdio) }
                 if provider == .remoteMCP {
                     TextField("MCP URL", text: $endpoint, prompt: Text("The server's documented MCP endpoint"))
@@ -227,15 +285,16 @@ private struct AddMCPConnection: View {
                     Button("Add Credential Variable") { environment.append(CredentialField()) }
                     Text("Runs the executable you specify. Keep secrets in credential variables; those values are stored in Keychain.").font(.caption).foregroundStyle(.secondary)
                 }
-                HStack { Toggle("Codex Proxy", isOn: $codex); Toggle("Claude Proxy", isOn: $claude) }
-            }.formStyle(.grouped).disabled(busy)
-            if let error { Text(error).font(.callout).foregroundStyle(.orange) }
-            HStack {
-                Spacer(); Button("Cancel") { dismiss() }.disabled(busy)
-                Button("Add Connection") { add() }.buttonStyle(.borderedProminent)
-                    .disabled(busy || name.trimmingCharacters(in: .whitespaces).isEmpty || (!codex && !claude) || (provider == .remoteMCP ? !ServiceConnection.validEndpoint(endpoint) || (authentication == .bearer && token.isEmpty) : command.isEmpty))
             }
-        }.padding(24).frame(width: 620, height: 570)
+            HStack { Toggle("Codex Proxy", isOn: $codex); Toggle("Claude Proxy", isOn: $claude) }
+        }.formStyle(.grouped).disabled(busy)
+    }
+    private func choose(_ preset: MCPConnectionPreset?) {
+        self.preset = preset
+        provider = .remoteMCP; authentication = preset?.authentication ?? .oauth
+        name = preset?.name ?? ""; endpoint = preset?.endpoint ?? ""
+        workspace = ""; token = ""; command = ""; arguments = "[]"; environment = []; error = nil
+        choosing = false
     }
     private func add() {
         do {
@@ -248,7 +307,7 @@ private struct AddMCPConnection: View {
                 }
             }
             let targets: [MCPClientTarget] = [codex ? .codex : nil, claude ? .claude : nil].compactMap { $0 }
-            let connection = ServiceConnection(provider: provider, name: name, identity: workspace.isEmpty ? nil : workspace, endpoint: provider == .remoteMCP ? endpoint : nil,
+            let connection = preset?.makeConnection(name: name, identity: workspace.isEmpty ? nil : workspace, targets: targets) ?? ServiceConnection(provider: provider, name: name, identity: workspace.isEmpty ? nil : workspace, endpoint: provider == .remoteMCP ? endpoint : nil,
                 authentication: provider == .remoteMCP ? authentication : .none, command: provider == .stdio ? command : nil, arguments: provider == .stdio ? args : [], environmentNames: env.keys.sorted(), targets: targets)
             let credential = ConnectorCredential(accessToken: authentication == .bearer && provider == .remoteMCP ? token : "", environment: env)
             busy = true; error = nil

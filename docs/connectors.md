@@ -21,6 +21,36 @@ refuses symlinked configuration paths, and only replaces marked/recognized manag
 changes need fresh client sessions. Removing a connection also stops existing relays from forwarding its
 next request; revoke provider consent separately when needed.
 
+## Quick connections
+
+Settings → Connectors → Add MCP Connection offers a searchable list. Selecting a service fills in its
+documented endpoint and authentication method. You can rename the connection, identify its account or
+workspace, and choose either or both proxy clients. Adding it again creates a separate connection UUID.
+OAuth sign-in remains an explicit action after saving. Custom MCP retains manual HTTP and local stdio setup.
+Choosing another service clears any token and local credential fields in the unsaved form.
+
+Provider definitions checked against these first-party sources on 2026-11-14:
+
+| Service | Endpoint | Authentication | Source |
+| --- | --- | --- | --- |
+| Linear | `https://mcp.linear.app/mcp` | OAuth | [Linear](https://linear.app/docs/mcp) |
+| Notion | `https://mcp.notion.com/mcp` | OAuth | [Notion](https://developers.notion.com/docs/get-started-with-mcp) |
+| GitHub | `https://api.githubcopilot.com/mcp/` | Bearer token | [GitHub hosted server](https://github.com/github/github-mcp-server/blob/main/docs/remote-server.md), [authentication](https://github.com/github/github-mcp-server/blob/main/docs/host-integration.md) |
+| Neon | `https://mcp.neon.tech/mcp` | OAuth | [Neon](https://neon.com/docs/ai/neon-mcp-server) |
+| Vercel | `https://mcp.vercel.com` | OAuth | [Vercel](https://vercel.com/docs/mcp/vercel-mcp) |
+| WorkOS | `https://mcp.workos.com/mcp` | OAuth | [WorkOS](https://workos.com/docs/mcp) |
+| Firecrawl | `https://mcp.firecrawl.dev/v2/mcp-oauth` | OAuth | [Firecrawl](https://docs.firecrawl.dev/mcp-server) |
+
+GitHub accepts personal access tokens; browser OAuth requires a registered client, which this manager
+does not supply. Choose token permissions appropriate to the repositories you want to access. The
+Firecrawl preset uses its OAuth endpoint; API keys are never placed in URLs. Convex's documented MCP
+uses a local CLI and project directory, so it remains available through Custom MCP. Gmail also needs
+an existing MCP server selected by the user; a ChatGPT/Claude Gmail web connection is not a server URL.
+
+This catalog verifies provider documentation, not live account access. Endpoints, client registration
+requirements and tool availability can change. Successful sign-in, discovery and authorized tool calls
+must be verified separately for each real account. Merely choosing or saving a preset proves none of these.
+
 ## Evidence and prerequisites
 
 Verified installed-client characterization on 2026-11-14: Codex 0.169.0 accepted a private MCP-only home,
