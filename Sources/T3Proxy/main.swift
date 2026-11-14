@@ -272,25 +272,6 @@ struct Root: View {
 }
 
 let args = CommandLine.arguments
-if args.contains("--connector-settings") {
-    // Inspect client tools without launching a second menu item, management-key access or polling.
-    let app = NSApplication.shared
-    app.setActivationPolicy(.regular)
-    let window = MainActor.assumeIsolated {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 700),
-                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-        window.contentViewController = NSHostingController(rootView: ConnectorsPane())
-        window.title = "T3 Proxy — Connectors"
-        window.setContentSize(NSSize(width: 700, height: 700))
-        window.contentMinSize = NSSize(width: 540, height: 400)
-        window.center(); window.makeKeyAndOrderFront(nil)
-        app.activate(ignoringOtherApps: true)
-        return window
-    }
-    app.run()
-    withExtendedLifetime(window) {}
-    exit(0)
-}
 if let index = args.firstIndex(of: "--check-connectors"), index + 1 < args.count {
     let id = args[index + 1]
     let done = DispatchSemaphore(value: 0)

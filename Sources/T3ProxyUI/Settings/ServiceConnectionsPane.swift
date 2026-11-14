@@ -12,23 +12,16 @@ public struct ConnectorsPane: View {
     @State private var adding = false
     @State private var diagnostics = false
     @State private var removing: ServiceConnection?
-    @State private var hubKey = ""
+    @StateObject private var setupModel = ProxyClientSetupModel()
+    private var working: Bool { busy || setupModel.busy }
     public init() {}
     public var body: some View {
         Form {
             Section {
-                Text("Connect once. Use in both clients.").font(.headline)
                 Text("Manage existing MCP servers and share each authenticated account with Codex Proxy and Claude Proxy.").foregroundStyle(.secondary)
-                Button("Set Up T3 Proxy") { setup() }.buttonStyle(.borderedProminent).disabled(busy)
-                DisclosureGroup("New profiles: hub inference key") {
-                    SecureField("Hub API key", text: $hubKey)
-                    Button("Save Inference Key") { saveHubKey() }.disabled(hubKey.isEmpty || busy)
-                    Text("New client launchers use this Keychain item. Existing launchers keep their authentication. This is separate from the management key and MCP accounts.").font(.caption).foregroundStyle(.secondary)
-                }
-            } header: { Text("Setup") } footer: {
-                Text("Creates proxy profiles, shares skills and plugins, and registers your connections. Applies to new client sessions.")
+                Button("Proxy Setup…") { SettingsRouter.shared.pane = .gettingStarted }
             }
-            if let message { Section { Text(message).textSelection(.enabled) } }
+            if let message = message ?? setupModel.message { Section { Text(message).textSelection(.enabled) } }
             Section {
                 if connections.isEmpty {
                     VStack(alignment: .leading, spacing: 6) {
@@ -45,20 +38,20 @@ public struct ConnectorsPane: View {
                                 Text(c.targets.map { $0 == .codex ? "Codex Proxy" : "Claude Proxy" }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer(minLength: 8)
-                            if c.authentication == .oauth { Button("Sign In…") { signIn(c) }.disabled(busy) }
-                            Button("Check") { check(c) }.disabled(busy)
-                            Button { removing = c } label: { Image(systemName: "trash") }.help("Remove this connection").disabled(busy)
+                            if c.authentication == .oauth { Button("Sign In…") { signIn(c) }.disabled(working) }
+                            Button("Check") { check(c) }.disabled(working)
+                            Button { removing = c } label: { Image(systemName: "trash") }.help("Remove this connection").disabled(working)
                         }
                         Text(statuses[c.id] ?? "Tool access not checked in this session").font(.caption).foregroundStyle(.secondary)
                     }.padding(.vertical, 4)
                 }
                 HStack {
-                    Button { adding = true } label: { Label("Add MCP Connection", systemImage: "plus") }.disabled(busy)
+                    Button { adding = true } label: { Label("Add MCP Connection", systemImage: "plus") }.disabled(working)
                     Spacer()
-                    if busy {
+                    if working {
                         ProgressView().controlSize(.small)
-                        if committing { Text("Applying changes…").font(.caption) }
-                        Button("Cancel") { operation?.cancel() }.disabled(committing)
+                        if committing || setupModel.committing { Text("Applying changes…").font(.caption) }
+                        Button("Cancel") { operation?.cancel(); setupModel.cancel() }.disabled(committing || setupModel.committing)
                     }
                 }
             } header: { Text("MCP connections") } footer: {
@@ -70,7 +63,7 @@ public struct ConnectorsPane: View {
             }
         }
         .formStyle(.grouped).navigationTitle("Connectors")
-        .task { reload() }.onDisappear { operation?.cancel() }
+        .task { reload() }.onDisappear { operation?.cancel(); setupModel.cancel() }
         .sheet(isPresented: $adding) { AddMCPConnection { reload(); setup() } }
         .sheet(isPresented: $diagnostics) {
             VStack { ClientConnectorDiagnostics(); Button("Done") { diagnostics = false }.padding() }.frame(minWidth: 640, minHeight: 600)
@@ -84,34 +77,8 @@ public struct ConnectorsPane: View {
         catch { message = "Connections could not be read. Storage was preserved." }
     }
     private func setup() {
-        guard !busy else { return }; busy = true; message = nil
-        let helper = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("T3Connectors").path ?? ""
-        operation = Task { @MainActor in
-            defer { busy = false; committing = false }
-            guard FileManager.default.isExecutableFile(atPath: helper) else { message = "The connection helper is missing. Install the complete T3 Proxy app bundle."; return }
-            guard await ProxyClient().health() else { message = "The hub is unavailable on the configured port. Start CLIProxyAPI or update Connection settings first."; return }
-            do {
-                try Task.checkCancellation()
-                let profiles = try ClientConnectors.profiles(settings: nil)
-                guard let codex = profiles.first(where: { $0.kind == .codex }), let claude = profiles.first(where: { $0.kind == .claude }),
-                      FileManager.default.isExecutableFile(atPath: codex.executable), FileManager.default.isExecutableFile(atPath: claude.executable) else { message = "Install Codex CLI and Claude Code before setup."; return }
-                let port = HubPort.current(), connections = self.connections
-                committing = true
-                let result = try await mutate { try ConnectorSetup(helper: helper, codex: codex.executable, claude: claude.executable, hubPort: port, connections: connections).install() }
-                try Task.checkCancellation()
-                message = result.changed.isEmpty ? "Setup is current. Start fresh proxy sessions to load managed connections." : "Configured \(result.changed.count) files and links. Start fresh proxy sessions. Registration is complete; inference and MCP access still need separate checks."
-            } catch is CancellationError { }
-            catch { if !Task.isCancelled { message = (error as? ConnectorSetupError)?.localizedDescription ?? "Setup failed. Check profile files and private backups before retrying." } }
-        }
-    }
-    private func saveHubKey() {
-        let value = hubKey; hubKey = ""; busy = true
-        operation = Task { @MainActor in
-            defer { busy = false; committing = false }
-            committing = true
-            do { try await mutate { try ConnectorCredentialStore(account: "hub-inference").save(.init(accessToken: value)) }; try Task.checkCancellation(); message = "Inference key saved in Keychain." }
-            catch { if !Task.isCancelled { message = "The inference key could not be saved." } }
-        }
+        message = nil
+        setupModel.apply()
     }
     private func check(_ c: ServiceConnection) {
         busy = true; message = nil
@@ -145,11 +112,81 @@ public struct ConnectorsPane: View {
             } catch { busy = false; if !Task.isCancelled { reload(); message = "Removal did not fully complete. Check storage and Keychain before retrying." } }
         }
     }
-    private func mutate<T: Sendable>(_ action: @escaping @Sendable () throws -> T) async throws -> T {
-        try Task.checkCancellation()
-        let worker = Task.detached { try Task.checkCancellation(); return try action() }
-        return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+}
+
+@MainActor
+private final class ProxyClientSetupModel: ObservableObject {
+    @Published private(set) var busy = false
+    @Published private(set) var committing = false
+    @Published private(set) var message: String?
+    private var operation: Task<Void, Never>?
+    func cancel() { operation?.cancel() }
+    func apply() {
+        guard !busy else { return }; busy = true; message = nil
+        let helper = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("T3Connectors").path ?? ""
+        operation = Task { @MainActor in
+            defer { busy = false; committing = false }
+            guard FileManager.default.isExecutableFile(atPath: helper) else { message = "The connection helper is missing. Install the complete T3 Proxy app bundle."; return }
+            guard await ProxyClient().health() else { message = "The hub is unavailable on the configured port. Start CLIProxyAPI or update Connection settings first."; return }
+            do {
+                try Task.checkCancellation()
+                let profiles = try ClientConnectors.profiles(settings: nil)
+                guard let codex = profiles.first(where: { $0.kind == .codex }), let claude = profiles.first(where: { $0.kind == .claude }),
+                      FileManager.default.isExecutableFile(atPath: codex.executable), FileManager.default.isExecutableFile(atPath: claude.executable) else { message = "Install Codex CLI and Claude Code before setup."; return }
+                let port = HubPort.current(), connections = try ServiceConnectionStore().load()
+                committing = true
+                let result = try await mutate { try ConnectorSetup(helper: helper, codex: codex.executable, claude: claude.executable, hubPort: port, connections: connections).install() }
+                try Task.checkCancellation()
+                message = result.changed.isEmpty ? "Setup is current. Start fresh proxy sessions to load managed connections." : "Configured \(result.changed.count) files and links. Start fresh proxy sessions. Registration is complete; inference and MCP access still need separate checks."
+            } catch is CancellationError { }
+            catch { if !Task.isCancelled { message = (error as? ConnectorSetupError)?.localizedDescription ?? "Setup failed. Check profile files and private backups before retrying." } }
+        }
     }
+    func saveHubKey(_ value: String) {
+        guard !busy else { return }; busy = true; message = nil
+        operation = Task { @MainActor in
+            defer { busy = false; committing = false }
+            committing = true
+            do { try await mutate { try ConnectorCredentialStore(account: "hub-inference").save(.init(accessToken: value)) }; try Task.checkCancellation(); message = "Inference key saved in Keychain." }
+            catch { if !Task.isCancelled { message = "The inference key could not be saved." } }
+        }
+    }
+}
+
+struct ProxyClientSetupSection: View {
+    @StateObject private var model = ProxyClientSetupModel()
+    @State private var hubKey = ""
+    var body: some View {
+        Section {
+            Text("Set up Codex Proxy and Claude Proxy").font(.headline)
+            Text("Connect T3 Code to the hub, share skills and plugins, and register your managed MCP connections.").foregroundStyle(.secondary)
+            HStack {
+                Button("Set Up T3 Proxy") { model.apply() }.buttonStyle(.borderedProminent).disabled(model.busy)
+                Spacer()
+                if model.busy {
+                    ProgressView().controlSize(.small)
+                    if model.committing { Text("Applying changes…").font(.caption) }
+                    Button("Cancel") { model.cancel() }.disabled(model.committing)
+                }
+            }
+            DisclosureGroup("New profiles: hub inference key") {
+                SecureField("Hub API key", text: $hubKey)
+                Button("Save Inference Key") { let value = hubKey; hubKey = ""; model.saveHubKey(value) }.disabled(hubKey.isEmpty || model.busy)
+                Text("New client launchers use this Keychain item. Existing launchers keep their authentication. This is separate from the management key and MCP accounts.").font(.caption).foregroundStyle(.secondary)
+            }
+            Button("Manage MCP Connections…") { SettingsRouter.shared.pane = .connectors }.disabled(model.busy)
+            if let message = model.message { Text(message).textSelection(.enabled) }
+        } header: { Text("Proxy client setup") } footer: {
+            Text("Creates proxy profiles and missing customization links while preserving existing settings. Applies to new client sessions.")
+        }
+        .onDisappear { model.cancel() }
+    }
+}
+
+private func mutate<T: Sendable>(_ action: @escaping @Sendable () throws -> T) async throws -> T {
+    try Task.checkCancellation()
+    let worker = Task.detached { try Task.checkCancellation(); return try action() }
+    return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
 }
 
 private struct AddMCPConnection: View {

@@ -154,12 +154,13 @@ struct GettingStartedSections: View {
                 CheckRow(state: .optional, title: "Usage history", detail: "Optional", button: "Usage…", action: { go(.usage) })
             }
         } header: { Text("Checklist") } footer: {
-            Text("Checks update live. T3 Proxy only talks to 127.0.0.1.").font(.footnote).foregroundStyle(.secondary)
+            Text("Checks update live. Hub checks use 127.0.0.1.").font(.footnote).foregroundStyle(.secondary)
         }
+        ProxyClientSetupSection()
         Section("1 · Install and run the hub") {
             step("T3 Proxy reads CLIProxyAPI, the local hub your tools send requests through. Install it with Homebrew:")
             code("brew install cliproxyapi")
-            step("Start it however you like (for example as a Homebrew service). T3 Proxy never starts it or runs commands.")
+            step("Start it however you like (for example as a Homebrew service). T3 Proxy does not start the hub.")
         }
         Section("2 · Port") {
             step("The hub listens on 127.0.0.1:\(port). If the hub's config.yaml sets another port (the top-level port: key), change it in Settings → Connection. Only loopback is supported.")
