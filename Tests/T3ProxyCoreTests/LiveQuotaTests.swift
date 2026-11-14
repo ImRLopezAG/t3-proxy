@@ -553,3 +553,54 @@ extension LiveQuotaRequestTests {
         await #expect(throws: LiveQuotaError.responseTooLarge) { try await large.management { try await $0.liveQuotaRead(.codexUsage, account: lqAccount(), key: $1) } }
     }
 }
+
+extension LiveQuotaRequestTests {
+    @Test func pausedCodexResetIsExplicitAndDoesNotEnableRouting() async throws {
+        var paused = lqAccount(); paused.disabled = true
+        paused.quota = QuotaReading(observedAt: lqNow, windows: [
+            .init(id: "session", label: "5-hour", usedPercent: 32, resetAt: lqNow + 2500),
+            .init(id: "weekly", label: "Weekly", usedPercent: 100, resetAt: lqNow + 4 * 86400)], models: [:], plan: nil)
+        let monitor = lqMonitor { req in
+            let body = requestBody(req)
+            let url = body["url"] as? String ?? ""
+            if url.hasSuffix("/consume") { return (200, envelope(#"{"code":"reset","windows_reset":2}"#)) }
+            if url.hasSuffix("reset-credits") { return (200, envelope(#"{"credits":[{"id":"credit_1","status":"available"}]}"#)) }
+            if url.hasSuffix("/usage") { return (200, envelope(#"{"rate_limit":{"primary_window":{"used_percent":32,"limit_window_seconds":18000},"secondary_window":{"used_percent":100,"limit_window_seconds":604800}},"rate_limit_reset_credits":{"available_count":1}}"#)) }
+            return (200, envelope("{}"))
+        }
+        let service = LiveQuotaService(monitor: monitor, clock: { lqNow })
+        #expect(await service.refresh([paused]).isEmpty)
+        let readings = await service.refresh([paused], includeDisabledCodex: true)
+        #expect(readings[paused.id]?.remaining(.weekly, at: lqNow) == 0)
+        let credit = try #require(try await service.resetCredits(paused).first)
+        let store = ResetCreditConfirmationStore()
+        #expect(throws: LiveQuotaError.invalidCredit) { try store.prepare(credit: credit, account: paused) }
+        let confirmed = try store.prepare(credit: credit, account: paused, allowDisabled: true).confirm()
+        #expect(try await service.consume(account: paused, confirmed: confirmed) == .reset(windows: 2))
+        var enabled = paused; enabled.disabled = false
+        await #expect(throws: LiveQuotaError.invalidAccount) { try await service.consume(account: enabled, confirmed: confirmed) }
+        #expect(paused.disabled)
+        #expect(!LQStub.seen.contains { $0.url?.path.contains("auth-files") == true || $0.url?.path.contains("reset-quota") == true })
+    }
+}
+
+extension LiveQuotaRequestTests {
+    @Test func uncertainResetCanReconfirmRoutingWithoutChangingRequest() async throws {
+        let account = lqAccount()
+        let credit = try listedCredit()
+        let original = try ResetCreditConfirmationStore().prepare(credit: credit, account: account).confirm()
+        var paused = account; paused.disabled = true
+        let retry = try original.prepareRetry(account: paused).confirm()
+        #expect(retry.requestID == original.requestID)
+        let monitor = lqMonitor { req in
+            let body = requestBody(req)
+            #expect((body["data"] as? String)?.contains(original.requestID.uuidString.lowercased()) == true)
+            return (200, envelope(#"{"code":"already_redeemed"}"#))
+        }
+        let service = LiveQuotaService(monitor: monitor)
+        #expect(try await service.consume(account: paused, confirmed: retry) == .alreadyRedeemed)
+        var different = paused; different.authIndex = "another-credential"
+        #expect(throws: LiveQuotaError.invalidCredit) { try original.prepareRetry(account: different) }
+        #expect(!LQStub.seen.contains { $0.url?.path.contains("auth-files") == true || $0.url?.path.contains("reset-quota") == true })
+    }
+}

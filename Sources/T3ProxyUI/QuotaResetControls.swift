@@ -15,7 +15,7 @@ struct QuotaResetControls: View {
     private var busy: Bool { live.claiming != nil || live.preparingClaude != nil }
 
     var body: some View {
-        if !account.disabled {
+        if !account.disabled || account.provider == .codex {
             if account.provider == .claude { claude }
             else if account.provider == .codex, windowID == nil || windowID == "weekly" { codex }
         }
@@ -84,12 +84,21 @@ struct QuotaResetControls: View {
                 Task { @MainActor in
                     if await confirmReset(title: "\(retry ? "Retry" : "Use") full reset on “\(live.label(for: account))”?",
                                           message: retry ? "Sends the same reset request again. If the first one went through, no second credit is spent."
-                                            : "Restarts this account's 5-hour and weekly limits. This uses one banked reset and can't be undone." + expiry,
+                                            + (account.disabled ? " Routing stays paused." : " Routing stays enabled.")
+                                            : "Restarts this account's 5-hour and weekly limits. This uses one banked reset and can't be undone." + expiry
+                                                + (account.disabled ? " Routing stays paused; this does not enable the account." : ""),
                                           retry: retry) {
                         await live.useReset(intent)
                     }
                 }
             }
+        } else if !compact {
+            Text(list == nil ? "Reset credits unavailable" : "No banked resets")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+        }
+        if !compact, account.disabled {
+            Text("Routing paused · resets can still be used. Resetting does not enable this account.")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
         }
     }
 

@@ -36,6 +36,7 @@ public final class LiveQuotaModel: ObservableObject {
         public let accountID: String
         fileprivate let authIndex: String?
         fileprivate let chatgptAccountID: String?
+        fileprivate let routingDisabled: Bool
         fileprivate let creditID: String
         fileprivate let keyEpoch: Int
     }
@@ -57,7 +58,7 @@ public final class LiveQuotaModel: ObservableObject {
     public func intent(for account: Account) -> ResetIntent? {
         guard let credit = pending[account.id]?.credit ?? credits[account.id]?.first else { return nil }
         return ResetIntent(accountID: account.id, authIndex: account.authIndex, chatgptAccountID: account.chatgptAccountID,
-                           creditID: credit.id, keyEpoch: keyEpoch)
+                           routingDisabled: account.disabled, creditID: credit.id, keyEpoch: keyEpoch)
     }
 
     @Published public private(set) var refreshing = false
@@ -127,11 +128,11 @@ public final class LiveQuotaModel: ObservableObject {
         guard !refreshing, monitor.management == .connected else { return }
         refreshing = true; defer { refreshing = false }
         let started = epoch, svc = service
-        let readings = await svc.refresh(monitor.accounts)
+        let readings = await svc.refresh(monitor.accounts, includeDisabledCodex: true)
         guard started == epoch else { return }
         monitor.applyLive(readings, epoch: keyEpoch)
         lastRefresh = Date()
-        for a in monitor.accounts where a.provider == .codex && !a.disabled {
+        for a in monitor.accounts where a.provider == .codex {
             guard started == epoch else { return }
             let count = readings[a.id]?.availableResetCredits
             if count == 0 { credits[a.id] = []; continue }
@@ -223,9 +224,10 @@ public final class LiveQuotaModel: ObservableObject {
         syncEpoch()
         let accountID = intent.accountID
         guard claiming == nil else { return .notAttempted }
-        // Re-check the account as it is now: still there, enabled, Codex, same credential.
-        guard let account = current(accountID), account.provider == .codex, !account.disabled else {
-            outcome = .init(accountID: accountID, text: "That account is disabled or gone, so no reset was used.", isError: true)
+        // Confirmed manual resets may target paused Codex subscriptions; automatic resume still requires enabled routing.
+        guard let account = current(accountID), account.provider == .codex,
+              account.disabled == intent.routingDisabled, (!requireExhausted || !account.disabled) else {
+            outcome = .init(accountID: accountID, text: "That account or its routing status changed, so no reset was used.", isError: true)
             return .notAttempted
         }
         // The credential, the key and the credit must be the ones the user confirmed.
@@ -237,10 +239,16 @@ public final class LiveQuotaModel: ObservableObject {
         let name = label(for: account)
         let attempt: PendingReset
         if let p = pending[accountID] {
-            attempt = p
+            // This method follows a fresh confirmation bound to the current routing state.
+            // Preserve the original credit, request and credential identity for an uncertain retry.
+            guard let confirmed = try? p.confirmed.prepareRetry(account: account).confirm() else {
+                outcome = .init(accountID: accountID, text: "The original reset belongs to another credential. Restore that account to check its outcome; no new request was sent.", isError: true)
+                return .notAttempted
+            }
+            attempt = PendingReset(credit: p.credit, confirmed: confirmed)
         } else {
             guard let credit = credits[accountID]?.first,
-                  let prepared = try? confirmations.prepare(credit: credit, account: account) else { return .notAttempted }
+                  let prepared = try? confirmations.prepare(credit: credit, account: account, allowDisabled: true) else { return .notAttempted }
             attempt = PendingReset(credit: credit, confirmed: prepared.confirm())
         }
         claiming = accountID; defer { claiming = nil }
@@ -251,7 +259,7 @@ public final class LiveQuotaModel: ObservableObject {
             result = try await svc.consume(account: account, confirmed: attempt.confirmed) { [weak self] in
                 guard let self, self.monitor.keyEpoch == intent.keyEpoch,
                       self.monitor.management == .connected,
-                      let current = self.current(accountID), current.provider == .codex, !current.disabled,
+                      let current = self.current(accountID), current.provider == .codex, current.disabled == intent.routingDisabled,
                       self.intent(for: current) == intent else { return false }
                 let credit = self.pending[accountID]?.credit ?? self.credits[accountID]?.first
                 guard credit == attempt.credit else { return false }
@@ -278,6 +286,7 @@ public final class LiveQuotaModel: ObservableObject {
             var text = windows > 0
                 ? "Reset used on \(name): \(windows) limit\(windows == 1 ? "" : "s") started over."
                 : "Reset used on \(name)."
+            if account.disabled { text += " Routing remains paused." }
             if svc.cooldownClearFailed.contains(accountID) { text += " The hub's cooldown for it couldn't be cleared; it clears on its own." }
             outcome = .init(accountID: accountID, text: text, isError: false, succeeded: true)
         case .alreadyRedeemed?:

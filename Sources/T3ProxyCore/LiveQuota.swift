@@ -64,14 +64,16 @@ public enum LiveQuotaTarget: CaseIterable, Sendable {
 
 extension ManagementClient {
     /// Reads one fixed target; consume is deliberately unavailable through this read API.
-    public func liveQuotaRead(_ target: LiveQuotaTarget, account: Account, key: String) async throws -> Data {
+    public func liveQuotaRead(_ target: LiveQuotaTarget, account: Account, key: String, allowDisabledCodex: Bool = false) async throws -> Data {
         guard target != .codexConsume else { throw LiveQuotaError.invalidCredit }
-        return try await quotaCall(target, account: account, confirmation: nil, key: key)
+        return try await quotaCall(target, account: account, confirmation: nil, key: key, allowDisabledCodex: allowDisabledCodex)
     }
 
     fileprivate func quotaCall(_ target: LiveQuotaTarget, account: Account,
-                               confirmation: ConfirmedResetCredit?, key: String) async throws -> Data {
-        guard !account.disabled, account.provider == target.provider,
+                               confirmation: ConfirmedResetCredit?, key: String, allowDisabledCodex: Bool = false) async throws -> Data {
+        let disabledReset = target == .codexConsume && confirmation?.routingDisabled == true
+        let disabledRead = allowDisabledCodex && [.codexUsage, .codexCredits].contains(target)
+        guard (!account.disabled || disabledReset || disabledRead), account.provider == target.provider,
               let index = account.authIndex, !index.isEmpty, index.utf8.count <= 256,
               !index.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             throw LiveQuotaError.invalidAccount
@@ -80,7 +82,7 @@ extension ManagementClient {
                                             "header": try target.headers(accountID: account.chatgptAccountID)]
         if target == .codexConsume {
             guard let confirmation, confirmation.accountIndex == index,
-                  confirmation.accountName == account.name, validCreditID(confirmation.creditID) else {
+                  confirmation.accountName == account.name, confirmation.routingDisabled == account.disabled, validCreditID(confirmation.creditID) else {
                 throw LiveQuotaError.invalidCredit
             }
             let payload = ["credit_id": confirmation.creditID, "redeem_request_id": confirmation.requestID.uuidString.lowercased()]
@@ -415,26 +417,36 @@ extension LiveQuotaParser {
 @MainActor public final class ResetCreditConfirmationStore {
     private var requests: [String: [String: UUID]] = [:]
     public init() {}
-    public func prepare(credit: ResetCredit, account: Account) throws -> ResetCreditConfirmation {
-        guard !account.disabled, account.provider == .codex, let index = account.authIndex, !index.isEmpty,
+    public func prepare(credit: ResetCredit, account: Account, allowDisabled: Bool = false) throws -> ResetCreditConfirmation {
+        guard (!account.disabled || allowDisabled), account.provider == .codex, let index = account.authIndex, !index.isEmpty,
               validCreditID(credit.id) else { throw LiveQuotaError.invalidCredit }
         let scope = index + "\u{0}" + account.name
         let request = requests[scope]?[credit.id] ?? UUID()
         requests[scope, default: [:]][credit.id] = request
-        return ResetCreditConfirmation(accountIndex: index, accountName: account.name, creditID: credit.id, requestID: request)
+        return ResetCreditConfirmation(routingDisabled: account.disabled, accountIndex: index, accountName: account.name, creditID: credit.id, requestID: request)
     }
 }
 public struct ResetCreditConfirmation: Sendable {
+    fileprivate let routingDisabled: Bool
     fileprivate let accountIndex: String
     fileprivate let accountName: String
     fileprivate let creditID: String
     public let requestID: UUID
     /// Invoke only after the user's deliberate confirmation. Refresh never calls this.
     public func confirm() -> ConfirmedResetCredit {
-        ConfirmedResetCredit(accountIndex: accountIndex, accountName: accountName, creditID: creditID, requestID: requestID)
+        ConfirmedResetCredit(routingDisabled: routingDisabled, accountIndex: accountIndex, accountName: accountName, creditID: creditID, requestID: requestID)
     }
 }
 public struct ConfirmedResetCredit: Sendable {
+    /// Present a fresh deliberate confirmation after routing changes, keeping the uncertain request pinned.
+    public func prepareRetry(account: Account) throws -> ResetCreditConfirmation {
+        guard account.provider == .codex, account.authIndex == accountIndex, account.name == accountName else {
+            throw LiveQuotaError.invalidCredit
+        }
+        return ResetCreditConfirmation(routingDisabled: account.disabled, accountIndex: accountIndex,
+                                       accountName: accountName, creditID: creditID, requestID: requestID)
+    }
+    fileprivate let routingDisabled: Bool
     fileprivate let accountIndex: String
     fileprivate let accountName: String
     fileprivate let creditID: String
@@ -484,13 +496,13 @@ public enum ResetCreditResult: Sendable, Equatable {
         await acquire(); defer { release() }
         try Task.checkCancellation()
         if target == .claudeUsage || target == .codexUsage { lastRead[identity(account)] = clock() }
-        return try await monitor.management { try await $0.liveQuotaRead(target, account: account, key: $1) }
+        return try await monitor.management { try await $0.liveQuotaRead(target, account: account, key: $1, allowDisabledCodex: account.provider == .codex) }
     }
 
     /// Map keyed by Account.id; failed reads retain the last good live reading (or are omitted).
-    public func refresh(_ accounts: [Account]) async -> [String: QuotaReading] {
+    public func refresh(_ accounts: [Account], includeDisabledCodex: Bool = false) async -> [String: QuotaReading] {
         await withTaskGroup(of: (String, QuotaReading?).self) { group in
-            for a in accounts where !a.disabled && a.provider != .other && a.authIndex?.isEmpty == false {
+            for a in accounts where (!a.disabled || includeDisabledCodex && a.provider == .codex) && a.provider != .other && a.authIndex?.isEmpty == false {
                 group.addTask { (a.id, await self.refreshAccount(a)) }
             }
             var result: [String: QuotaReading] = [:]
@@ -546,7 +558,7 @@ public enum ResetCreditResult: Sendable, Equatable {
     }
 
     public func resetCredits(_ account: Account) async throws -> [ResetCredit] {
-        guard account.provider == .codex, !account.disabled else { throw LiveQuotaError.invalidAccount }
+        guard account.provider == .codex else { throw LiveQuotaError.invalidAccount }
         return try LiveQuotaParser.resetCredits(await read(.codexCredits, account: account), now: clock())
     }
 
@@ -596,7 +608,7 @@ public enum ResetCreditResult: Sendable, Equatable {
     /// No automatic retry. The caller retains the confirmed value to retry the same request.
     public func consume(account: Account, confirmed credit: ConfirmedResetCredit,
                         revalidate: @MainActor @Sendable () -> Bool = { true }) async throws -> ResetCreditResult {
-        guard account.provider == .codex, !account.disabled else { throw LiveQuotaError.invalidAccount }
+        guard account.provider == .codex, account.disabled == credit.routingDisabled else { throw LiveQuotaError.invalidAccount }
         let keyEpoch = monitor.keyEpoch
         await acquire(); defer { release() }
         try Task.checkCancellation()
@@ -624,6 +636,8 @@ public enum ResetCreditResult: Sendable, Equatable {
         let id = identity(account)
         generations[id, default: 0] += 1
         cache[id] = nil; lastRead[id] = nil
+        // A reset of a paused subscription must not change its routing or local cooldown state.
+        guard !account.disabled else { cooldownClearFailed.remove(account.id); return }
         do {
             try await monitor.management { try await $0.clearLiveQuotaCooldown(account: account, key: $1) }
             cooldownClearFailed.remove(account.id)
