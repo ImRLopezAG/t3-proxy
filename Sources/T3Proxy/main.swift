@@ -27,6 +27,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var clickMonitor: Any?
     private var nativeSubscriptions: Set<AnyCancellable> = []
     private var titleTimer: Timer?
+    private var agentIcon: AgentStatusIcon?
+    private var agentActivity = AgentActivityReducer()
     /// Where the panel's top edge sits; kept when the content height changes between tabs.
     private var anchorTop: CGFloat = 0
 
@@ -52,7 +54,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     }
                 }
             }.store(in: &nativeSubscriptions)
-        item.button?.image = statusIconImage()
+        if let button = item.button { agentIcon = AgentStatusIcon(button: button) }
         item.button?.toolTip = "T3 Proxy"
         item.button?.target = self
         item.button?.action = #selector(clicked)
@@ -78,8 +80,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ProxyDeckMigrationModel.shared.start(monitor: monitor)
         let t3 = T3CodeModel.shared()
         t3.start()
-        t3.$snapshot.combineLatest(t3.$status).map { $1.isConnected && T3ThreadBoard.needsAttention($0) }.removeDuplicates()
-            .sink { [weak self] on in self?.item.button?.image = statusIconImage(attention: on) }
+        t3.$snapshot.combineLatest(t3.$status)
+            .sink { [weak self] snapshot, status in
+                guard let self else { return }
+                guard status.isConnected, let snapshot else {
+                    self.agentActivity.disconnect()
+                    self.agentIcon?.apply(AgentActivityUpdate())
+                    return
+                }
+                self.agentIcon?.apply(self.agentActivity.update(snapshot, now: .now))
+            }
             .store(in: &nativeSubscriptions)
         if CommandLine.arguments.contains("--open") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.toggle() }
@@ -101,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let font = item.button?.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
         let textWidth = (widest as NSString).size(withAttributes: [.font: font]).width
         item.length = ceil(18 + (widest.isEmpty ? 0 : 4 + textWidth) + 12)
+        agentIcon?.layout()
     }
     /// Finder/Spotlight reopen must work even when the menu bar hides the icon.
     func applicationShouldHandleReopen(_ s: NSApplication, hasVisibleWindows f: Bool) -> Bool {
@@ -280,6 +291,15 @@ struct Root: View {
 }
 
 let args = CommandLine.arguments
+if args.contains("--agent-icon-preview") {
+    let previewApp = NSApplication.shared
+    previewApp.setActivationPolicy(.accessory)
+    let previewWindow = MainActor.assumeIsolated { AgentIconPreview.show() }
+    print("Synthetic icon preview window: \(previewWindow.windowNumber)")
+    fflush(stdout)
+    previewApp.run()
+    exit(0)
+}
 if let index = args.firstIndex(of: "--check-connectors"), index + 1 < args.count {
     let id = args[index + 1]
     let done = DispatchSemaphore(value: 0)

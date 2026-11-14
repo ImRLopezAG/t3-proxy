@@ -79,33 +79,3 @@ struct ProviderMark: View {
     }
 }
 
-/// The single menu bar icon: "T3" over the route line from the app icon, as a template image.
-/// The menu-bar glyph. With `attention`, an orange dot sits at the top right; the size never changes.
-/// A template image can't carry colour, so that variant draws in the label colour of the current appearance.
-public func statusIconImage(attention: Bool = false) -> NSImage {
-    let img = NSImage(size: NSSize(width: 22, height: 18), flipped: true) { _ in
-        let ink: NSColor = attention ? .labelColor : .black
-        let font = NSFont.systemFont(ofSize: 11.5, weight: .heavy)
-        let s = NSAttributedString(string: "T3", attributes: [.font: font, .foregroundColor: ink])
-        let w = s.size().width
-        s.draw(at: NSPoint(x: (22 - w) / 2, y: -0.5))
-        ink.set()
-        let p = NSBezierPath()
-        p.lineWidth = 1.2
-        p.move(to: NSPoint(x: 3.5, y: 14))
-        p.line(to: NSPoint(x: 8, y: 14))
-        p.curve(to: NSPoint(x: 11, y: 16), controlPoint1: NSPoint(x: 9.5, y: 14), controlPoint2: NSPoint(x: 9.5, y: 16))
-        p.curve(to: NSPoint(x: 14, y: 14), controlPoint1: NSPoint(x: 12.5, y: 16), controlPoint2: NSPoint(x: 12.5, y: 14))
-        p.line(to: NSPoint(x: 18.5, y: 14))
-        p.stroke()
-        for x in [3.0, 19.0] { NSBezierPath(ovalIn: NSRect(x: x - 1.5, y: 12.5, width: 3, height: 3)).fill() }
-        if attention {
-            NSColor.systemOrange.setFill()
-            NSBezierPath(ovalIn: NSRect(x: 17, y: 0.5, width: 5, height: 5)).fill()
-        }
-        return true
-    }
-    img.isTemplate = !attention
-    img.accessibilityDescription = attention ? "T3 Proxy, a thread needs you" : "T3 Proxy"
-    return img
-}
