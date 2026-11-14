@@ -15,6 +15,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     case usage = "Usage"
     case config = "Config"
     case plugins = "Plugins"
+    case connectors = "Connectors"
     case logs = "Logs"
     case proxyDeck = "Proxy Deck"
     case system = "About Proxy"
@@ -32,6 +33,7 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
         case .usage: "chart.bar.xaxis"
         case .config: "slider.horizontal.3"
         case .plugins: "puzzlepiece.extension"
+        case .connectors: "app.connected.to.app.below.fill"
         case .logs: "doc.text.magnifyingglass"
         case .proxyDeck: "arrow.right.arrow.left.circle"
         case .system: "info.circle"
@@ -77,6 +79,7 @@ public struct SettingsView: View {
             case .usage: UsagePane(monitor: monitor)
             case .config: ConfigPane(monitor: monitor)
             case .plugins: PluginsPane(monitor: monitor)
+            case .connectors: ConnectorsPane()
             case .logs: LogsPane(monitor: monitor)
             case .proxyDeck: ProxyDeckPane()
             case .system: SystemPane(monitor: monitor)

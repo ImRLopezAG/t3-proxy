@@ -272,6 +272,51 @@ struct Root: View {
 }
 
 let args = CommandLine.arguments
+if args.contains("--connector-settings") {
+    // Inspect client tools without launching a second menu item, management-key access or polling.
+    let app = NSApplication.shared
+    app.setActivationPolicy(.regular)
+    let window = MainActor.assumeIsolated {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 700),
+                              styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        window.contentViewController = NSHostingController(rootView: ConnectorsPane())
+        window.title = "T3 Proxy — Connectors"
+        window.setContentSize(NSSize(width: 700, height: 700))
+        window.contentMinSize = NSSize(width: 540, height: 400)
+        window.center(); window.makeKeyAndOrderFront(nil)
+        app.activate(ignoringOtherApps: true)
+        return window
+    }
+    app.run()
+    withExtendedLifetime(window) {}
+    exit(0)
+}
+if let index = args.firstIndex(of: "--check-connectors"), index + 1 < args.count {
+    let id = args[index + 1]
+    let done = DispatchSemaphore(value: 0)
+    Task.detached {
+        do {
+            let settings = try? Data(contentsOf: URL(fileURLWithPath: T3CodePaths().settings))
+            guard let profile = try ClientConnectors.profiles(settings: settings).first(where: { $0.id == id }) else {
+                throw ConnectorError.unavailable
+            }
+            let value = try await ClientConnectors.inspect(profile)
+            let report: [String: Any] = ["profile": profile.id, "home": profile.home,
+                "chatgptIdentityPresent": value.identity != nil, "inferenceConfiguredForHub": value.inferenceAtHub,
+                "webStatus": value.webStatus.rawValue, "registered": value.registered,
+                "apps": value.apps.map { ["name": $0.name, "inCatalog": $0.inCatalog, "callable": $0.callable] as [String: Any] },
+                "servers": value.servers.map { ["name": $0.name, "auth": $0.auth, "tools": $0.tools, "discoveryFailed": $0.discoveryFailed] as [String: Any] },
+                "issues": value.issues, "retrievalVerified": false]
+            let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys, .prettyPrinted])
+            print(String(decoding: data, as: UTF8.self))
+        } catch {
+            print((error as? ConnectorError)?.localizedDescription ?? "Client connector check failed.")
+            done.signal(); exit(1)
+        }
+        done.signal()
+    }
+    done.wait(); exit(0)
+}
 if let i = args.firstIndex(of: "--render-preview"), i + 1 < args.count {
     // Design comparison only. Rendered images carry the SAMPLE banner.
     MainActor.assumeIsolated {

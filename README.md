@@ -4,8 +4,8 @@ A native macOS menu-bar app for a local [CLIProxyAPI](https://github.com/router-
 how much of your Claude and Codex subscriptions you have left, what your traffic would cost at API prices, and what
 your T3 Code threads are doing, all from one icon in the menu bar.
 
-Written in Swift with SwiftUI and AppKit. No dependencies, no web views for the UI, and no network traffic beyond
-127.0.0.1.
+Written in Swift with SwiftUI and AppKit. No dependencies or web views for the UI. Hub management uses
+127.0.0.1; optional connector checks run your installed client, which contacts its configured services.
 
 ## What you get
 
@@ -96,6 +96,37 @@ restart to you. An action blocked by a loaded plugin must be reviewed and retrie
 
 The page requires a hub build with the Plugins and Plugin Store management APIs. Older builds show an
 unsupported message. Store authentication, when required, is configured in the hub.
+
+### Shared MCP connections
+
+Settings → **Connectors** manages existing MCP servers. Add a connection once, choose **Codex Proxy**,
+**Claude Proxy**, or both, then authenticate with that MCP service. Add separate named connections for
+each account or workspace, including multiple accounts at the same MCP URL. T3 Proxy does not build
+service integrations or import ChatGPT/Claude web connections.
+
+**Set Up T3 Proxy** creates missing isolated profiles and customization links, registers the two proxy
+providers in T3 Code, and synchronizes managed MCP entries. Existing inference configuration, MCP servers,
+accounts and original profiles are preserved. Changed files receive private backups. Setup never starts
+or restarts CLIProxyAPI. New launchers need a hub API key saved separately in Keychain; existing launchers
+keep their authentication. Start fresh client sessions after setup.
+
+Remote connections support Streamable HTTP with OAuth, a bearer token, or no authentication. Local
+connections use an executable and a JSON array of arguments; credential environment variables go in
+Keychain. Use a provider's documented endpoint or executable. Gmail, GitHub, Linear, Notion and other
+services are supplied by the MCP server you choose, with that server's permissions and capabilities.
+
+T3 Proxy uses the installed Codex CLI as an MCP transport/OAuth engine for both clients, in a private home
+for each connection. It never starts model turns in that engine. An internal per-connection relay forwards
+the upstream server's actual tools and resource reads; there is no aggregate T3 tool catalog. Each connection
+has a unique server identity, so credentials do not follow rotating inference subscriptions. OAuth is stored
+by Codex in Keychain; bearer tokens and credential variables use T3 Proxy's separate Keychain items.
+This requires a compatible Codex app-server API (verified with 0.169.0). OAuth endpoints that require an
+unavailable client registration report an authorization failure. Prompts, subscriptions and interactive
+server elicitation are not forwarded in this first version.
+
+**Check** verifies discovery, not successful service tool calls. **Client Diagnostics** checks profile tool
+catalogs separately. Real Gmail search/read/attachment access still requires an existing Gmail MCP server,
+its account consent, and verification through fresh proxy sessions. [Implementation and evidence](docs/connectors.md).
 
 ## Update
 

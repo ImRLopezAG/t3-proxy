@@ -37,6 +37,9 @@ struct PluginsPane: View {
                         .accessibilityLabel("Search plugins")
                 }.padding()
                 Form {
+                    Section {
+                        Button("Manage Client Connectors…") { SettingsRouter.shared.pane = .connectors }
+                    } footer: { Text("This page manages hub plugins. ChatGPT/Claude connectors and local MCP servers belong to each client profile.") }
                     if let error { Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange) } }
                     if let notice {
                         Section {
