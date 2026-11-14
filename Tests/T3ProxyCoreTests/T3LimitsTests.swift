@@ -32,6 +32,16 @@ private actor StubLimitsHub: T3LimitsHub {
 }
 
 extension T3LimitsTests {
+    @Test func originalClaudeUsageURLRemainsSupported() async {
+        let hub = StubLimitsHub(), h = handler(hub)
+        let response = await h.handle(request("api-call", method: "POST", body: ["auth_index": "c", "url": "https://api.anthropic.com/api/oauth/usage"]))
+        #expect(response.status == 200)
+        #expect(await hub.calls == 2)
+        for url in ["https://api.anthropic.com/api/oauth/usage?evil=1", "https://evil.test/api/oauth/usage"] {
+            #expect(await h.handle(request("api-call", method: "POST", body: ["auth_index": "c", "url": url])).status == 403)
+        }
+    }
+
     private func request(_ op: String = "auth-files", method: String = "GET", body: [String: Any]? = nil,
                          headers: [String: String] = ["host": "127.0.0.1:8318", "authorization": "Bearer secret"]) -> T3LimitsRequest {
         .init(method: method, path: T3LimitsHandler.prefix + op, headers: headers,

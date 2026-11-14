@@ -3,6 +3,45 @@ import Testing
 @testable import T3ProxyCore
 
 @Suite struct LiveQuotaParserTests {
+    @Test func claudeResetGrantsAreReadFromUsage() throws {
+        let q = try LiveQuotaParser.usage(Data(#"{"cedar_ember":{"eligible":true,"grants":[{"id":"weekly","label":"Weekly reset","type":"weekly","resets_left":1,"clears":["seven_day"],"ends_at":"2026-12-10T22:00:00Z"},{"id":"model","label":"Fable reset","type":"full","resets_left":2,"clears":["seven_day_overage_included"],"gives_back_weekly":true,"ends_at":"2027-03-09T07:59:00Z","usable_now":true}]}}"#.utf8), provider: .claude, now: lqNow)
+        #expect(q.availableResetCredits == 3)
+        let status = try #require(q.claudeResets)
+        #expect(status.grants.map(\.kind) == [.weekly, .fable])
+        #expect(status.grants[1].resetsLeft == 2 && status.grants[1].usableNow)
+        #expect(status.grants[1].givesBackWeekly && status.grants[1].clears == ["seven_day_overage_included"])
+        #expect(status.grants[0].expiresAt == parseHubDate("2026-12-10T22:00:00Z"))
+        #expect(status.grants[1].expiresAt == parseHubDate("2027-03-09T07:59:00Z"))
+        #expect(status.remaining(at: try #require(parseHubDate("2026-12-10T22:00:00Z"))) == 2)
+        #expect(status.remaining(at: try #require(parseHubDate("2027-03-09T07:59:00Z"))) == 0)
+    }
+
+    @Test(arguments: ["null", "{}", #"{"eligible":true}"#, #"{"eligible":true,"grants":[null]}"#,
+                      #"{"eligible":true,"grants":[{"id":"bad","resets_left":true,"clears":[]}]}"#,
+                      #"{"eligible":true,"grants":[{"id":"bad","resets_left":1.5,"clears":[]}]}"#,
+                      #"{"eligible":true,"grants":[{"id":"bad","resets_left":1,"clears":[],"ends_at":"broken"}]}"#,
+                      #"{"eligible":1,"grants":[]}"#])
+    func claudeUnavailableResetGrantsStayUnknown(_ block: String) throws {
+        let q = try LiveQuotaParser.usage(Data("{\"five_hour\":{\"utilization\":25},\"cedar_ember\":\(block)}".utf8), provider: .claude, now: lqNow)
+        #expect(q.claudeResets == nil && q.availableResetCredits == nil)
+        #expect(q.window(.session)?.usedPercent == 25)
+    }
+
+    @Test func claudeResetZeroAndHeldGrantsAreDistinct() throws {
+        let empty = try LiveQuotaParser.usage(json(#"{"cedar_ember":{"eligible":false,"grants":[]}}"#), provider: .claude, now: lqNow)
+        #expect(empty.availableResetCredits == 0 && empty.claudeResets?.eligible == false)
+        let q = try LiveQuotaParser.usage(json(#"{"cedar_ember":{"eligible":true,"grants":[{"id":"paused","label":"user@example.test","resets_left":1,"clears":["five_hour"],"paused":true},{"id":"future","resets_left":2,"clears":["five_hour","seven_day"],"starts_at":"2099-01-01T00:00:00Z"},{"id":"spent","resets_left":0,"clears":[]}]}}"#), provider: .claude, now: lqNow)
+        #expect(q.availableResetCredits == 1)
+        let held = try #require(q.claudeResets?.grants.first { $0.id == "paused" })
+        #expect(held.paused && !held.usableNow && held.kind == .session)
+        #expect(held.title == "5-hour reset")
+        #expect(q.claudeResets?.grants.first { $0.id == "future" }?.kind == .full)
+    }
+
+    @Test func claudeUsageRequestsResetDetailsWithoutDroppingSpend() {
+        #expect(LiveQuotaTarget.claudeUsage.url == "https://api.anthropic.com/api/oauth/usage?cedar_ember=1")
+    }
+
     @Test func claudeScopedLimitsAndSafety() throws {
         let data = Data(#"{"five_hour":{"utilization":140},"seven_day":{"utilization":"NaN"},"limits":[{"kind":"weekly_scoped","scope":{"model":{"display_name":"Fable"}},"percent":42,"resets_at":"2026-11-08T00:00:00Z"}]}"#.utf8)
         let q = try LiveQuotaParser.usage(data, provider: .claude)
@@ -309,6 +348,23 @@ private func envelope(_ body: String, status: Int = 200) -> String {
 }
 
 extension LiveQuotaRequestTests {
+    @Test func serviceReadsClaudeGrantsAndSpendTogetherWithoutConsuming() async throws {
+        let m = lqMonitor { r in
+            let body = requestBody(r)
+            let url = body["url"] as? String ?? ""
+            if url.contains("profile") { return (200, envelope("{}")) }
+            #expect(url == "https://api.anthropic.com/api/oauth/usage?cedar_ember=1")
+            #expect(body["method"] as? String == "GET" && body["data"] == nil)
+            return (200, envelope(#"{"five_hour":{"utilization":25},"extra_usage":{"is_enabled":true,"used_credits":123},"cedar_ember":{"eligible":true,"grants":[{"id":"model","type":"full","resets_left":2,"gives_back_weekly":true,"clears":["seven_day_overage_included"],"ends_at":"2027-03-09T07:59:00Z"}]}}"#))
+        }
+        let a = lqAccount(.claude), service = LiveQuotaService(monitor: m, clock: { lqNow })
+        let readings = await service.refresh([a])
+        let q = try #require(readings[a.id])
+        #expect(q.claudeResets?.grants.first?.kind == .fable && q.availableResetCredits == 2)
+        #expect(q.credits?.balance == 123 && q.window(.session)?.usedPercent == 25)
+        #expect(LQStub.seen.count == 2)
+    }
+
     @Test func atMostTwoHubCallsWhileOthersAreQueued() async {
         let m = lqMonitor { _ in (200, envelope("{}")) }, held = LQHeldRequests()
         LQStub.holdNext(2) { held.append($0) }

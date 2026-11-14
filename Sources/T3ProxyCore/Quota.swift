@@ -94,6 +94,7 @@ public struct QuotaReading: Sendable, Equatable {
     public var source: QuotaSource = .recorded
     public var credits: LiveCredits? = nil
     public var availableResetCredits: Int? = nil
+    public var claudeResets: ClaudeResetStatus? = nil
     public var planInfo: PlanInfo? = nil
     public var observedAt: Date?
     public var windows: [QuotaWindow]

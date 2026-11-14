@@ -2,7 +2,7 @@ import SwiftUI
 import T3ProxyCore
 
 /// Quota per account (live reads through the hub, or the headers it recorded from the last real
-/// request), then pooled per provider with reset times, model-specific limits and Codex resets.
+/// request), then pooled per provider with reset times, model-specific limits and reset grants.
 struct QuotaPane: View {
     @ObservedObject var monitor: Monitor
     @ObservedObject var live: LiveQuotaModel
@@ -79,7 +79,9 @@ struct QuotaPane: View {
                     TableColumn("5-hour") { a in WindowCell(a: a, kind: .session, now: now) }.width(min: 90, ideal: 110)
                     TableColumn("Weekly") { a in WindowCell(a: a, kind: .weekly, now: now) }.width(min: 90, ideal: 110)
                     TableColumn("Resets") { a in
-                        if a.provider == .codex, let n = live.credits[a.id]?.count ?? a.quota.availableResetCredits {
+                        if a.provider == .claude, let resets = a.quota.claudeResets {
+                            Text("\(resets.remaining(at: now)) banked").foregroundStyle(.secondary)
+                        } else if a.provider == .codex, let n = live.credits[a.id]?.count ?? a.quota.availableResetCredits {
                             Text(n == 0 ? "None" : "\(n) banked").foregroundStyle(n == 0 ? .secondary : .primary)
                         } else { Text("—").foregroundStyle(.secondary) }
                     }.width(min: 60, ideal: 70)
@@ -123,14 +125,64 @@ struct QuotaPane: View {
                 }
             }
             if p == .codex { resetRows(now: now) }
+            if p == .claude { claudeResetRows(now: now) }
         } header: {
             HStack(spacing: 6) { ProviderMark(provider: p, size: 14); Text(p.title) }
         } footer: {
             Text(p == .claude
-                 ? "Claude has no banked resets: each limit comes back at the reset time shown."
+                 ? "Claude reset credits are separate from scheduled quota refills. Fable resets return Fable's contribution to weekly usage; they don't reset the whole week."
                  : "A banked reset starts an account's 5-hour and weekly limits over. Codex grants them occasionally and they expire.")
                 .font(.footnote).foregroundStyle(.secondary)
         }
+    }
+
+    @ViewBuilder private func claudeResetRows(now: Date) -> some View {
+        ForEach(monitor.accounts.filter { $0.provider == .claude && !$0.disabled }) { a in
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Resets · \(live.label(for: a))").fontWeight(.medium)
+                    Spacer()
+                    Link("Manage in Claude…", destination: URL(string: "https://claude.ai/settings/usage")!)
+                }
+                if let status = a.quota.claudeResets {
+                    let grants = status.grants.filter { $0.isUnexpired(at: now) }
+                    if grants.isEmpty {
+                        Text(status.eligible ? "No banked resets" : "No reset grants reported for this account")
+                            .foregroundStyle(.secondary)
+                    }
+                    ForEach(ClaudeResetKind.allCases, id: \.self) { kind in
+                        let group = grants.filter { $0.kind == kind }
+                        if !group.isEmpty {
+                            DisclosureGroup {
+                                ForEach(group) { grant in
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("\(grant.title) · \(grant.resetsLeft)")
+                                        Text(grant.expiresAt.map { "Expires \(resetExpiry($0))" } ?? "No expiry reported")
+                                            .foregroundStyle(.secondary)
+                                        Text(grant.paused ? "Paused" : status.eligible && grant.usableNow ? "Available now" : "Not currently usable")
+                                            .foregroundStyle(.secondary)
+                                    }.font(.caption).padding(.vertical, 3)
+                                }
+                            } label: {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("\(kind.title) · \(group.reduce(0) { $0 + $1.resetsLeft })")
+                                    if let expiry = group.compactMap(\.expiresAt).min() {
+                                        Text("Next expires \(resetExpiry(expiry))").font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    Text(live.refreshing ? "Checking reset credits…" : "Reset credits unavailable")
+                        .foregroundStyle(.secondary)
+                }
+            }.padding(.vertical, 4)
+        }
+    }
+
+    private func resetExpiry(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened) + " " + (TimeZone.current.abbreviation(for: date) ?? "")
     }
 
     @ViewBuilder private func resetRows(now: Date) -> some View {

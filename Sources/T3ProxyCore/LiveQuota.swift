@@ -35,7 +35,8 @@ public enum LiveQuotaTarget: CaseIterable, Sendable {
     }
     public var url: String {
         switch self {
-        case .claudeUsage: "https://api.anthropic.com/api/oauth/usage"
+        // Claude omits reset grants unless explicitly requested. Keep spend in this same reading.
+        case .claudeUsage: "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
         case .claudeProfile: "https://api.anthropic.com/api/oauth/profile"
         case .codexUsage: "https://chatgpt.com/backend-api/wham/usage"
         case .codexAccounts: "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
@@ -46,7 +47,7 @@ public enum LiveQuotaTarget: CaseIterable, Sendable {
     public var method: String { self == .codexConsume ? "POST" : "GET" }
     func headers(accountID: String?) throws -> [String: String] {
         var h = ["Authorization": "Bearer $TOKEN$", "User-Agent": provider == .claude
-                 ? "claude-cli/2.1.280 (external, cli)" : "codex-tui/0.149.1"]
+                 ? "claude-cli/2.1.325 (external, cli)" : "codex-tui/0.149.1"]
         if provider == .claude { h["anthropic-beta"] = "oauth-2025-04-20" }
         if [.codexUsage, .codexCredits, .codexConsume].contains(self) {
             h["Content-Type"] = "application/json"; h["OpenAI-Beta"] = "codex-1"; h["Originator"] = "Codex Desktop"
@@ -114,6 +115,10 @@ private func liveNumber(_ v: Any?) -> Double? {
     }
     return (v as? String).flatMap(finiteNumber)
 }
+private func liveBool(_ v: Any?) -> Bool? {
+    guard let n = v as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
+    return n.boolValue
+}
 private func livePercent(_ v: Any?) -> Double? { liveNumber(v).map { min(100, max(0, $0)) } }
 private func liveDate(_ v: Any?) -> Date? {
     let d: Date?
@@ -152,6 +157,8 @@ public enum LiveQuotaParser {
         q.source = .live
         switch provider {
         case .claude:
+            q.claudeResets = claudeResets(o["cedar_ember"])
+            q.availableResetCredits = q.claudeResets?.remaining(at: now)
             for (key, id, title) in [("five_hour", "five-hour", "5-hour session"), ("seven_day", "seven-day", "Weekly"),
                                       ("seven_day_opus", "seven-day-opus", "Weekly · Opus"),
                                       ("seven_day_sonnet", "seven-day-sonnet", "Weekly · Sonnet"),
@@ -245,6 +252,82 @@ public enum LiveQuotaParser {
         guard provider == .codex, let accountID, let all = o["accounts"] as? [String: Any],
               let entry = all[accountID] as? [String: Any], let a = entry["account"] as? [String: Any] else { return PlanInfo(plan: nil, org: nil) }
         return PlanInfo(plan: allowedPlan(a["plan_type"]), org: a["structure"] as? String == "workspace" ? PlanCache.cleanOrg(a["name"] as? String) : nil)
+    }
+}
+
+public enum ClaudeResetKind: String, Sendable, CaseIterable {
+    case fable, weekly, session, full, other
+    public var title: String {
+        switch self {
+        case .fable: "Fable reset"
+        case .weekly: "Weekly reset"
+        case .session: "5-hour reset"
+        case .full: "Full reset"
+        case .other: "Reset"
+        }
+    }
+}
+
+/// Display-only grants. They cannot enter the Codex reset-confirmation or redemption flow.
+public struct ClaudeResetGrant: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let title: String
+    public let kind: ClaudeResetKind
+    public let resetsLeft: Int
+    public let startsAt: Date?
+    public let expiresAt: Date?
+    public let paused: Bool
+    public let usableNow: Bool
+    public let givesBackWeekly: Bool
+    public let clears: [String]
+
+    public func isUnexpired(at now: Date) -> Bool {
+        resetsLeft > 0 && expiresAt.map { $0 > now } != false && startsAt.map { $0 <= now } != false
+    }
+}
+
+public struct ClaudeResetStatus: Sendable, Equatable {
+    public let eligible: Bool
+    public let grants: [ClaudeResetGrant]
+    public func remaining(at now: Date) -> Int {
+        grants.filter { $0.isUnexpired(at: now) }.reduce(0) { $0 + $1.resetsLeft }
+    }
+}
+
+extension LiveQuotaParser {
+    /// Schema verified against Claude CLI 2.1.325 and live OAuth usage responses.
+    /// Missing or malformed grants are unknown, never an invented zero balance.
+    private static func claudeResets(_ value: Any?) -> ClaudeResetStatus? {
+        guard let status = value as? [String: Any], let eligible = liveBool(status["eligible"]),
+              let raw = status["grants"] as? [[String: Any]], raw.count <= 1000 else { return nil }
+        var seen = Set<String>(), grants: [ClaudeResetGrant] = []
+        for g in raw {
+            guard let id = g["id"] as? String, validCreditID(id), seen.insert(id).inserted,
+                  let n = liveNumber(g["resets_left"]), n >= 0, n <= 1_000_000, n.rounded() == n,
+                  let clears = g["clears"] as? [String], clears.count <= 64,
+                  clears.allSatisfy({ $0.range(of: #"^[a-z0-9_]{1,64}$"#, options: .regularExpression) != nil }) else { return nil }
+            let start = liveDate(g["starts_at"]), expiry = liveDate(g["ends_at"])
+            if let v = g["starts_at"], !(v is NSNull), start == nil { return nil }
+            if let v = g["ends_at"], !(v is NSNull), expiry == nil { return nil }
+            let givesBack = g["gives_back_weekly"] as? Bool ?? false
+            let kind: ClaudeResetKind
+            // Claude's CLI classifies gives_back_weekly grants as Fable even when type is "full".
+            if givesBack { kind = .fable }
+            else if let type = g["type"] as? String {
+                kind = ClaudeResetKind(rawValue: type).flatMap { $0 == .fable ? nil : $0 } ?? .other
+            } else {
+                let session = clears.contains("five_hour"), weekly = clears.contains { $0 != "five_hour" }
+                kind = session && weekly ? .full : session ? .session : weekly ? .weekly : .other
+            }
+            let label = (g["label"] as? String).flatMap { $0.contains("@") ? nil : ManagementRules.cleanNickname($0, max: 160) }
+            grants.append(ClaudeResetGrant(id: id, title: label ?? kind.title, kind: kind, resetsLeft: Int(n),
+                                          startsAt: start, expiresAt: expiry, paused: g["paused"] as? Bool ?? false,
+                                          usableNow: g["usable_now"] as? Bool ?? false, givesBackWeekly: givesBack, clears: clears))
+        }
+        return ClaudeResetStatus(eligible: eligible, grants: grants.sorted {
+            let a = $0.expiresAt ?? .distantFuture, b = $1.expiresAt ?? .distantFuture
+            return a == b ? $0.id < $1.id : a < b
+        })
     }
 }
 

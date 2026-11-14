@@ -24,7 +24,15 @@ struct AccountHoverCard: View {
                 Text("No limit reading for this account yet.").font(.system(size: 11)).foregroundStyle(t.secondary)
             }
             ForEach(windows, id: \.window.id) { AccountWindowPace(state: $0, tint: tint, now: now) }
-            if let n = account.quota.availableResetCredits, n > 0 {
+            if let resets = account.quota.claudeResets {
+                ForEach(ClaudeResetKind.allCases, id: \.self) { kind in
+                    let count = resets.grants.filter { $0.kind == kind && $0.isUnexpired(at: now) }.reduce(0) { $0 + $1.resetsLeft }
+                    if count > 0 {
+                        Label("\(kind.title) · \(count) banked", systemImage: "arrow.counterclockwise.circle")
+                            .font(.system(size: 10.5)).foregroundStyle(t.secondary)
+                    }
+                }
+            } else if account.provider == .codex, let n = account.quota.availableResetCredits, n > 0 {
                 Label("\(n) limit reset credit\(n == 1 ? "" : "s") available", systemImage: "arrow.counterclockwise.circle")
                     .font(.system(size: 10.5)).foregroundStyle(t.secondary)
             }
