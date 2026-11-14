@@ -127,7 +127,7 @@ private final class ProxyClientSetupModel: ObservableObject {
         operation = Task { @MainActor in
             defer { busy = false; committing = false }
             guard FileManager.default.isExecutableFile(atPath: helper) else { message = "The connection helper is missing. Install the complete T3 Proxy app bundle."; return }
-            guard await ProxyClient().health() else { message = "The hub is unavailable on the configured port. Start CLIProxyAPI or update Connection settings first."; return }
+            guard await ProxyClient().health() else { message = "The hub is unavailable on the configured port. Start CLIProxyAPI or update Settings → CLIProxyAPI → Connection first."; return }
             do {
                 try Task.checkCancellation()
                 let profiles = try ClientConnectors.profiles(settings: nil)

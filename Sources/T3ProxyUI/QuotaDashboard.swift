@@ -1,7 +1,6 @@
 import SwiftUI
 import T3ProxyCore
 
-/// Provider quota lanes for the resizable Settings page.
 struct QuotaDashboard: View {
     let accounts: [Account]
     let endpoint: String
@@ -9,175 +8,87 @@ struct QuotaDashboard: View {
     var live: LiveQuotaModel? = nil
     var connected = true
     var sample = false
-    @Environment(\.colorScheme) private var scheme
+    var inspect: (Account) -> Void = { _ in }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            ForEach([Provider.codex, .claude], id: \.self) { provider in
-                let own = accounts.filter { $0.provider == provider }
+        VStack(alignment: .leading, spacing: 20) {
+            ForEach([Provider.claude, .codex, .other], id: \.self) { provider in
+                let own = accounts.filter { $0.provider == provider }.sorted { $0.quotaLabel(among: accounts).localizedStandardCompare($1.quotaLabel(among: accounts)) == .orderedAscending }
                 if !own.isEmpty {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 7) {
-                            ProviderMark(provider: provider, size: 17)
-                            Text(provider.title).font(.system(size: 14, weight: .semibold))
-                            let count = own.filter { !$0.disabled }.count
-                            Text("\(count) subscription\(count == 1 ? "" : "s")").font(.system(size: 11)).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            ProviderMark(provider: provider, size: 16)
+                            Text(provider == .other ? "Other providers" : provider.title).fontWeight(.semibold)
                             Spacer()
+                            Text("\(own.count) accounts").font(.caption).foregroundStyle(.secondary)
                         }
-                        let lanes = quotaLanes(accounts, provider: provider, now: now)
-                        ForEach(lanes) { lane in
-                            laneView(lane, provider: provider)
+                        if provider != .other {
+                            let lanes = quotaLanes(accounts, provider: provider, now: now)
+                            HStack(spacing: 18) {
+                                ForEach(lanes.filter { $0.id == QuotaWindowKind.session.rawValue || $0.id == QuotaWindowKind.weekly.rawValue }) { lane in
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(lane.title).font(.caption).foregroundStyle(.secondary)
+                                        Text(lane.remaining.map { "\(Int($0.rounded()))% left" } ?? "No reading").font(.headline).monospacedDigit()
+                                        Text("\(lane.measured) measured").font(.caption2).foregroundStyle(.tertiary)
+                                    }.frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                            }
                         }
-                        let unmeasured = own.filter { !$0.disabled && $0.quota.windows.isEmpty }
-                        if !unmeasured.isEmpty { supplemental(unmeasured, title: "Awaiting readings") }
-                        let disabled = own.filter(\.disabled)
-                        if !disabled.isEmpty { supplemental(disabled, title: "Disabled") }
+                        ForEach(own) { account in
+                            row(account)
+                                .settingsQuotaDetails(enabled: !sample, inspect: { inspect(account) }) {
+                                    QuotaAccountDetails(account: account, label: account.quotaLabel(among: accounts), endpoint: endpoint,
+                                                        live: live, connected: connected).id(account.id)
+                                }
+                            if account.id != own.last?.id { Divider() }
+                        }
                     }
                 }
             }
-            let others = accounts.filter { $0.provider == .other }
-            if !others.isEmpty { supplemental(others, title: "Other accounts") }
-            if accounts.isEmpty { Note(text: "No accounts registered.") }
-            HStack(spacing: 12) {
-                HStack(spacing: 5) {
-                    RoundedRectangle(cornerRadius: 1).fill(.secondary).frame(width: 2, height: 12)
-                    Text("Even pace")
-                }
-                Text("Ticks: local midnight")
-                Text("W: Weekly · F: Fable · Full: both limits")
-            }
-            .font(.system(size: 10)).foregroundStyle(.secondary)
-            Text("Account shares are equally weighted. Unknown readings are excluded from averages. Hover or click an account for details.")
-                .font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if accounts.isEmpty { Text("No accounts registered.").foregroundStyle(.secondary) }
+            Text("Provider averages equally weight measured accounts; they are not shared subscription capacity. Bars show remaining quota and pace. Hover for resets; click to pin details.")
+                .font(.caption2).foregroundStyle(.secondary)
         }
     }
 
-    private func laneView(_ lane: QuotaLane, provider: Provider) -> some View {
-        HStack(alignment: .center, spacing: 16) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(lane.title).font(.system(size: 12)).foregroundStyle(.secondary)
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(lane.remaining.map { "\(Int($0.rounded()))%" } ?? "—")
-                        .font(.system(size: 26, weight: .semibold)).monospacedDigit()
-                    if lane.remaining != nil { Text("left").font(.system(size: 11)).foregroundStyle(.secondary) }
+    private func row(_ account: Account) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(account.quotaLabel(among: accounts)).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 4)
+                if account.disabled { Text("Disabled").foregroundStyle(.secondary) }
+                else if account.held { Text(account.heldReason ?? "Held").foregroundStyle(.orange).lineLimit(1) }
+                else if let plan = account.quota.planInfo?.plan ?? account.quota.plan {
+                    Text(plan.capitalized).foregroundStyle(.secondary).lineLimit(1)
                 }
-                if let gain = lane.resetGainPercent, gain >= 0.5 {
-                    Label("+\(Int(gain.rounded()))%", systemImage: "arrow.clockwise")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                        .help("Share of this measured pool restored at the next scheduled reset, assuming no further use.")
-                }
-                Text("\(lane.measured)/\(lane.entries.count) measured").font(.system(size: 9)).foregroundStyle(.tertiary)
+            }.font(.callout)
+            HStack(spacing: 16) {
+                AccountQuotaBar(quota: account.quota, kind: .session, provider: account.provider, now: now)
+                AccountQuotaBar(quota: account.quota, kind: .weekly, provider: account.provider, now: now)
             }
-            .frame(width: 108, alignment: .leading)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), spacing: 8)], spacing: 8) {
-                ForEach(lane.entries) { entry in
-                    QuotaAccountTile(entry: entry, label: entry.account.quotaLabel(among: accounts),
-                                     endpoint: endpoint, now: now, live: live, connected: connected, sample: sample)
-                }
+            if account.quota.accountWindows().contains(where: { $0.window.kind == nil }) {
+                Text("Additional limits in details").font(.caption2).foregroundStyle(.secondary)
             }
-        }
-        .padding(12)
-        .background(.primary.opacity(scheme == .dark ? 0.025 : 0.018), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.primary.opacity(0.07), lineWidth: 1))
-    }
-
-    private func supplemental(_ list: [Account], title: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 225), alignment: .leading)], alignment: .leading, spacing: 6) {
-                ForEach(list) { account in
-                    HStack(spacing: 6) {
-                        ProviderMark(provider: account.provider, size: 12, name: account.providerName)
-                        Text(account.quotaLabel(among: accounts)).lineLimit(1)
-                        Spacer(minLength: 4)
-                        Text(account.disabled ? "Disabled" : account.heldReason ?? "No reading").foregroundStyle(.secondary).lineLimit(1)
-                    }
-                    .font(.system(size: 10)).padding(8)
-                    .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
-                    .contentShape(Rectangle())
-                    .hoverCard(enabled: !sample, interactive: true, clickToOpen: true) {
-                        QuotaAccountDetails(account: account, label: account.quotaLabel(among: accounts),
-                                            endpoint: endpoint, live: live, connected: connected)
-                            .id(account.id)
-                    }
-                }
-            }
-        }
+        }.padding(.vertical, 4).contentShape(Rectangle()).opacity(account.disabled ? 0.6 : 1)
     }
 }
 
-/// Observes banked tickets and uncertain attempts as well as the monitor-owned account readings.
 struct LiveQuotaDashboard: View {
     let accounts: [Account]
     let endpoint: String
     let now: Date
     @ObservedObject var live: LiveQuotaModel
     var connected = true
-
+    var inspect: (Account) -> Void = { _ in }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if !connected { Label("Hub disconnected · showing last readings", systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange) }
             if let outcome = live.outcome {
                 Label(outcome.text, systemImage: outcome.isError ? "exclamationmark.triangle" : "checkmark.circle")
-                    .font(.system(size: 11)).foregroundStyle(outcome.isError ? .orange : .green)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .font(.caption).foregroundStyle(outcome.isError ? .orange : .green)
             }
-            QuotaDashboard(accounts: accounts, endpoint: endpoint, now: now, live: live, connected: connected)
+            QuotaDashboard(accounts: accounts, endpoint: endpoint, now: now, live: live, connected: connected, inspect: inspect)
         }
-    }
-}
-
-private struct QuotaAccountTile: View {
-    let entry: QuotaLane.Entry
-    let label: String
-    let endpoint: String
-    let now: Date
-    let live: LiveQuotaModel?
-    let connected: Bool
-    let sample: Bool
-    @Environment(\.colorScheme) private var scheme
-
-    private var state: WindowState { WindowState(entry.window, entry.account.quota, now: now) }
-    private var laneID: String { entry.window.window.kind?.rawValue ?? entry.window.id }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 6) {
-                Text(label).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
-                if state.urgent {
-                    Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-                        .help(state.pace?.summary ?? "")
-                }
-                Spacer(minLength: 0)
-                if entry.remaining != nil, let reset = entry.window.window.resetAt {
-                    Label(shortDuration(until: reset, from: now), systemImage: "arrow.clockwise")
-                        .font(.system(size: 9)).fixedSize().foregroundStyle(.secondary)
-                }
-                if let live {
-                    QuotaResetControls(account: entry.account, live: live, now: now, windowID: laneID, compact: true, connected: connected)
-                }
-            }
-            HStack(spacing: 8) {
-                PaceBar(remaining: entry.remaining, pace: state.pace, tint: state.fill(Theme(scheme).tint(entry.account.provider)))
-                    .frame(height: 5)
-                if let remaining = entry.remaining {
-                    Text("\(Int(remaining.rounded()))%")
-                        .font(.system(size: 10.5, weight: .semibold)).monospacedDigit()
-                        .foregroundStyle(remaining <= 0 ? .red : remaining < 10 ? .orange : .primary)
-                        .frame(width: 34, alignment: .trailing)
-                } else {
-                    Text(state.expired ? "Expired" : "Unknown").font(.system(size: 10)).foregroundStyle(.secondary).fixedSize()
-                }
-            }
-        }
-        .font(.system(size: 11)).padding(9)
-        .contentShape(RoundedRectangle(cornerRadius: 7))
-        .hoverCard(enabled: !sample, interactive: true, clickToOpen: true) {
-            QuotaAccountDetails(account: entry.account, label: label, endpoint: endpoint,
-                                selected: entry.window.id, live: live, connected: connected)
-                .id(entry.account.id)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(label), \(entry.window.title), \(entry.remaining.map { "\(Int($0.rounded())) percent left" } ?? "reading unavailable")")
     }
 }
 

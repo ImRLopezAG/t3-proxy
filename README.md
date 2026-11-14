@@ -73,14 +73,14 @@ Homebrew and the install script do this for you.
 
 1. **Start the hub** if it isn't running (`brew services start cliproxyapi`, or however you run it).
 2. **Open T3 Proxy.** It lives in the menu bar, not the Dock. Click the icon or press **⌃⌥⌘P** to open the panel.
-   The shortcut can be changed in Settings → Connection.
-3. **Enter the hub's management key** in Settings → Connection. It is the secret you set under
+   The shortcut can be changed in Settings → T3 Proxy → General.
+3. **Enter the hub's management key** in Settings → CLIProxyAPI → Connection. It is the secret you set under
    `remote-management` → `secret-key` in the hub's `config.yaml`. If the hub doesn't listen on 8317, set its port on the same pane.
 4. **Allow Keychain access.** macOS asks once whether T3 Proxy may read the key it stored. Choose **Always Allow**.
-5. **Optional:** connect T3 Code (Settings → T3 Code) and turn on usage recording (Settings → Usage) for history
+5. **Optional:** connect T3 Code (Settings → T3 Code) and turn on usage recording (Settings → T3 Proxy → History) for history
    and cost estimates.
 
-Settings → Getting Started shows this checklist with live check marks.
+Settings → T3 Proxy → Setup shows this checklist with live check marks.
 
 ### Plugins
 
@@ -113,7 +113,7 @@ Pipedream handles the service connection; available tools and account selection 
 **Custom MCP…** keeps manual remote and local server setup available, including alternative Gmail
 servers and project-specific servers. Each addition has its own local connection identity.
 
-Settings → **Getting Started** → **Set Up T3 Proxy** creates missing isolated profiles and customization links, registers the two proxy
+Settings → T3 Proxy → **Setup** → **Set Up T3 Proxy** creates missing isolated profiles and customization links, registers the two proxy
 providers in T3 Code, and synchronizes managed MCP entries. Existing inference configuration, MCP servers,
 accounts and original profiles are preserved. Changed files receive private backups. Setup never starts
 or restarts CLIProxyAPI. New launchers need a hub API key saved separately in Keychain; existing launchers
@@ -159,9 +159,15 @@ With the script: `curl -fsSL https://raw.githubusercontent.com/ImRLopezAG/t3-pro
 It keeps `~/Library/Application Support/T3 Proxy` and the `dev.t3proxy.app` preferences. The management key stays in
 your login Keychain until you delete it in Keychain Access.
 
+## Dashboard and Settings
+
+The window has five sections: Dashboard, Accounts, Connectors, Plugins, and Settings. Dashboard combines live limits, usage statistics, the activity calendar, and account/model history. Accounts groups subscriptions by provider, with search, status filters, compact quota bars, and an inspector. Use **Add Account** (⌘N) to open sign-in or import in a dialog.
+
+Settings groups app preferences, T3 Code, CLIProxyAPI administration, and routing into tabs. Deck Migration appears when legacy Deck state is present. In Dashboard, hover an account for limits and reset details, or click to pin its inspector. The compact menu-bar panel keeps its side cards.
+
 ## Usage history and cost estimates
 
-Turning on recording (Settings → Usage) makes T3 Proxy read the hub's usage queue every 30 seconds. It keeps the
+Turning on recording (Settings → T3 Proxy → History) makes T3 Proxy read the hub's usage queue every 30 seconds. It keeps the
 records in `~/Library/Application Support/T3 Proxy/usage.sqlite`.
 
 - Only one app can record a hub. Reading the queue removes the records from it, so recording stays off while
@@ -173,7 +179,7 @@ records in `~/Library/Application Support/T3 Proxy/usage.sqlite`.
 
 ### Moving from Proxy Deck
 
-Settings → Proxy Deck imports Proxy Deck's history and plan labels. Proxy Deck's files are only read, and the import
+Settings → Deck Migration imports Proxy Deck's history and plan labels. Proxy Deck's files are only read, and the import
 can be repeated safely. **Retire** then stops Proxy Deck's launch agent and keeps its files. After that, T3 Proxy
 takes over the T3 Code limits endpoint and usage recording. **Restore** undoes it.
 

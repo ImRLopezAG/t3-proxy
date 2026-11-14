@@ -118,7 +118,9 @@ struct GettingStartedPane: View {
         let content = PanelContent(reachability: monitor.reachability, management: monitor.management,
                                    endpoint: monitor.endpointLabel, accounts: [], updatedAt: nil)
         Form { GettingStartedSections(list: SetupChecklist(content, t3Connected: t3.status.isConnected),
-                                      port: monitor.endpoint.port) { router.pane = $0 } }
+                                      port: monitor.endpoint.port) { router.pane = $0 }
+            ClientSetupSnippets(base: monitor.endpoint.base.absoluteString)
+        }
             .formStyle(.grouped)
             .navigationTitle("Getting Started")
             .toolbar {
@@ -145,13 +147,13 @@ struct GettingStartedSections: View {
                      detail: list.t3Connected ? "Threads tab is live" : "Optional", button: "T3 Code…", action: { go(.t3code) })
             switch list.recorder {
             case .recording:
-                CheckRow(state: .ok, title: "Usage history", detail: "Recording", button: "Usage…", action: { go(.usage) })
+                CheckRow(state: .ok, title: "Usage history", detail: "Recording", button: "History…", action: { go(.recording) })
             case .otherApp:
-                CheckRow(state: .ok, title: "Usage history", detail: "Recorded by another app (Proxy Deck)", button: "Usage…", action: { go(.usage) })
+                CheckRow(state: .ok, title: "Usage history", detail: "Recorded by another app (Proxy Deck)", button: "History…", action: { go(.recording) })
             case .attention(let why):
-                CheckRow(state: .missing, title: "Usage history", detail: why, button: "Usage…", action: { go(.usage) })
+                CheckRow(state: .missing, title: "Usage history", detail: why, button: "History…", action: { go(.recording) })
             case .off:
-                CheckRow(state: .optional, title: "Usage history", detail: "Optional", button: "Usage…", action: { go(.usage) })
+                CheckRow(state: .optional, title: "Usage history", detail: "Optional", button: "History…", action: { go(.recording) })
             }
         } header: { Text("Checklist") } footer: {
             Text("Checks update live. Hub checks use 127.0.0.1.").font(.footnote).foregroundStyle(.secondary)
@@ -163,15 +165,15 @@ struct GettingStartedSections: View {
             step("Start it however you like (for example as a Homebrew service). T3 Proxy does not start the hub.")
         }
         Section("2 · Port") {
-            step("The hub listens on 127.0.0.1:\(port). If the hub's config.yaml sets another port (the top-level port: key), change it in Settings → Connection. Only loopback is supported.")
+            step("The hub listens on 127.0.0.1:\(port). If the hub's config.yaml sets another port (the top-level port: key), change it in Settings → CLIProxyAPI → Connection. Only loopback is supported.")
         }
         Section("3 · Management key") {
-            step("In the hub's config.yaml, set remote-management → secret-key, then restart the hub. Paste that secret in Settings → Connection. It is stored in the Keychain and sent only to 127.0.0.1.")
+            step("In the hub's config.yaml, set remote-management → secret-key, then restart the hub. Paste that secret in Settings → CLIProxyAPI → Connection. It is stored in the Keychain and sent only to 127.0.0.1.")
             step("After a rejected key, nothing is sent until you enter a different one, so the hub doesn't lock this Mac out.")
         }
         Section("Optional") {
             step("T3 Code: connect it in Settings → T3 Code to see threads that need you in the panel's Threads tab.")
-            step("Usage history: turn on recording in Settings → Usage to keep token and cost history over time.")
+            step("Usage history: turn on recording in Settings → T3 Proxy → History to keep token and cost history over time.")
         }
     }
     private func step(_ s: String) -> some View { Text(s).fixedSize(horizontal: false, vertical: true) }

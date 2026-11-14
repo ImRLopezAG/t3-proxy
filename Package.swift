@@ -9,5 +9,6 @@ let package = Package(
         .executableTarget(name: "T3Proxy", dependencies: ["T3ProxyCore", "T3ProxyUI"]),
         .executableTarget(name: "T3Connectors", dependencies: ["T3ProxyCore"]),
         .testTarget(name: "T3ProxyCoreTests", dependencies: ["T3ProxyCore"]),
+        .testTarget(name: "T3ProxyUITests", dependencies: ["T3ProxyUI"]),
     ]
 )

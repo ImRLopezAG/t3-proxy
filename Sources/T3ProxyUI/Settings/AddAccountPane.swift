@@ -47,7 +47,7 @@ struct AddAccountPane: View {
                 Text("Sign in with a provider to add an account to your local proxy. Finish in your browser, enter a device code, or import a service-account file.")
                     .foregroundStyle(.secondary)
                 if locked {
-                    Label(monitor.hasKey ? "Management key rejected. Check Connection." : "Set a management key in Connection first.", systemImage: "key.slash")
+                    Label(monitor.hasKey ? "Management key rejected. Check Settings → CLIProxyAPI → Connection." : "Set a management key in Settings → CLIProxyAPI → Connection first.", systemImage: "key.slash")
                         .foregroundStyle(.secondary)
                 }
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 166), spacing: 12, alignment: .top)], alignment: .leading, spacing: 12) {
@@ -277,7 +277,7 @@ struct AddAccountPane: View {
 
     static func message(_ e: Error) -> String {
         switch e {
-        case ManagementError.locked: "No accepted management key. Check Connection."
+        case ManagementError.locked: "No accepted management key. Check Settings → CLIProxyAPI → Connection."
         case ProxyError.unauthorized: "The proxy rejected the management key."
         case ProxyError.unreachable: "The proxy isn't reachable."
         case ProxyError.http(let c): "The hub answered HTTP \(c)."

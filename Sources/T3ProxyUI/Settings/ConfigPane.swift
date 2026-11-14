@@ -5,6 +5,8 @@ import T3ProxyCore
 /// together after one confirmation. Server, access and secrets stay read-only (masked in the decoder).
 struct ConfigPane: View {
     @ObservedObject var monitor: Monitor
+    enum Scope { case hub, routing }
+    var scope: Scope = .hub
     @State private var summary: ConfigSummary?
     @State private var loading = false
     @State private var error: String?
@@ -24,7 +26,7 @@ struct ConfigPane: View {
 
     var body: some View {
         content
-            .navigationTitle("Config")
+            .navigationTitle(scope == .hub ? "Configuration" : "Routing engine")
             .toolbar {
                 ToolbarItemGroup {
                     if !changes.isEmpty {
@@ -71,39 +73,43 @@ struct ConfigPane: View {
         Form {
             if let error { Label(error, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red) }
             if let notice, changes.isEmpty { Label(notice, systemImage: "checkmark.circle.fill").foregroundStyle(.green) }
-            Section("Routing") {
-                edit(.strategy, s); edit(.forceModelPrefix, s); edit(.sessionAffinity, s); edit(.sessionAffinityTTL, s)
+            if scope == .routing {
+                Section("Routing") {
+                    edit(.strategy, s); edit(.forceModelPrefix, s); edit(.sessionAffinity, s); edit(.sessionAffinityTTL, s)
+                }
+                Section("Retries and Cooldowns") {
+                    edit(.requestRetry, s); edit(.maxRetryInterval, s); edit(.maxRetryCredentials, s)
+                    edit(.disableCooling, s); edit(.saveCooldownStatus, s); edit(.transientErrorCooldown, s)
+                }
+                Section("When Quota Runs Out") {
+                    edit(.switchProject, s); edit(.switchPreviewModel, s)
+                }
             }
-            Section("Retries and Cooldowns") {
-                edit(.requestRetry, s); edit(.maxRetryInterval, s); edit(.maxRetryCredentials, s)
-                edit(.disableCooling, s); edit(.saveCooldownStatus, s); edit(.transientErrorCooldown, s)
-            }
-            Section("Logging and Usage") {
-                edit(.loggingToFile, s); edit(.usageStatistics, s); edit(.debug, s); edit(.requestLog, s)
-                edit(.errorLogsMaxFiles, s); edit(.logsMaxTotalSizeMB, s)
-            }
-            Section("When Quota Runs Out") {
-                edit(.switchProject, s); edit(.switchPreviewModel, s)
-            }
-            Section("Requests") {
-                edit(.passthroughHeaders, s); edit(.keepalive, s)
-                row("Proxy URL", s.proxyURL ?? "Not set")
-            }
-            Section {
-                edit(.commercialMode, s); edit(.plugins, s)
-                row("Host", s.host); row("Port", s.port); row("TLS", s.tls)
-            } header: { Text("Server") } footer: {
-                Text("Host, port and TLS are read-only here: changing them would disconnect T3 Code and this app.")
+            if scope == .hub {
+                Section("Logging and Usage") {
+                    edit(.loggingToFile, s); edit(.usageStatistics, s); edit(.debug, s); edit(.requestLog, s)
+                    edit(.errorLogsMaxFiles, s); edit(.logsMaxTotalSizeMB, s)
+                }
+                Section("Requests") {
+                    edit(.passthroughHeaders, s); edit(.keepalive, s)
+                    row("Proxy URL", s.proxyURL ?? "Not set")
+                }
+                Section {
+                    edit(.commercialMode, s); edit(.plugins, s)
+                    row("Host", s.host); row("Port", s.port); row("TLS", s.tls)
+                } header: { Text("Server") } footer: {
+                    Text("Host, port and TLS are read-only here: changing them would disconnect T3 Code and this app.")
                     .font(.footnote).foregroundStyle(.secondary)
-            }
-            Section {
-                row("Client API keys", "\(s.clientKeys)")
-                row("Provider API keys", "\(s.providers.reduce(0) { $0 + $1.keys.count })")
-                row("Management key", s.managementKeySet ? "Set" : "Not set")
-                row("Remote management", s.allowRemote)
-                row("Control panel disabled", s.panelDisabled)
-            } header: { Text("Access") } footer: {
-                Text("Keys and remote management can't be changed from T3 Proxy.").font(.footnote).foregroundStyle(.secondary)
+                }
+                Section {
+                    row("Client API keys", "\(s.clientKeys)")
+                    row("Provider API keys", "\(s.providers.reduce(0) { $0 + $1.keys.count })")
+                    row("Management key", s.managementKeySet ? "Set" : "Not set")
+                    row("Remote management", s.allowRemote)
+                    row("Control panel disabled", s.panelDisabled)
+                } header: { Text("Access") } footer: {
+                    Text("Keys and remote management can't be changed from T3 Proxy.").font(.footnote).foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -227,8 +233,8 @@ struct LockedView: View {
             Label(monitor.management == .rejected ? "Key Rejected" : "No Management Key", systemImage: "key.slash")
         } description: {
             Text(monitor.management == .rejected
-                 ? "Requests are paused until the key is replaced in Connection."
-                 : "Set the management key in Connection to see \(what).")
+                 ? "Requests are paused until the key is replaced in Settings → CLIProxyAPI → Connection."
+                 : "Set the management key in Settings → CLIProxyAPI → Connection to see \(what).")
         }
     }
 }
