@@ -113,59 +113,70 @@ struct AccountsPane: View {
 
     private var directory: some View {
         let groups = AccountDirectory.groups(model.credentials, search: search, filter: filter)
-        return List(selection: $selection) {
-            if groups.isEmpty {
-                ContentUnavailableView.search(text: search)
+        return Table(of: Credential.self, selection: $selection) {
+            TableColumn("Account") { c in identity(c) }
+                .width(min: 140, ideal: 190)
+            TableColumn("Plan") { c in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(c.planLabel ?? "Unknown").lineLimit(1)
+                        .foregroundStyle(c.planLabel == nil ? .secondary : .primary)
+                    if let org = c.org {
+                        Text(org).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
             }
+            .width(min: 90, ideal: 140)
+            TableColumn("Status") { c in status(c) }
+                .width(min: 96, ideal: 120)
+            TableColumn("5-hour") { c in
+                AccountQuotaCell(quota: quota(for: c), kind: .session, provider: c.provider)
+            }
+            .width(min: 90, ideal: 120)
+            TableColumn("Weekly") { c in
+                AccountQuotaCell(quota: quota(for: c), kind: .weekly, provider: c.provider)
+            }
+            .width(min: 90, ideal: 120)
+            TableColumn("Priority") { c in
+                Text("\(c.priority)").monospacedDigit()
+                    .foregroundStyle(c.priority == 0 ? .secondary : .primary)
+            }
+            .width(50)
+        } rows: {
             ForEach(groups) { group in
                 Section {
-                    ForEach(group.credentials) { credential in
-                        accountRow(credential).tag(credential.id)
-                            .contextMenu {
-                                AccountActions(c: credential, busy: model.busy != nil, ask: ask, edit: { editing = $0 })
-                            }
-                            .onTapGesture(count: 2) { selection = credential.id; showInspector = true }
-                            .accessibilityAction(named: "Show Account Details") { selection = credential.id; showInspector = true }
-                    }
+                    ForEach(group.credentials) { TableRow($0) }
                 } header: {
                     HStack { Text(group.title); Text("\(group.credentials.count)").foregroundStyle(.tertiary) }
                 }
             }
         }
-        .listStyle(.inset)
+        .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .overlay {
+            if groups.isEmpty { ContentUnavailableView.search(text: search) }
+        }
+        .contextMenu(forSelectionType: Credential.ID.self) { ids in
+            if let id = ids.first, let c = model.credentials.first(where: { $0.id == id }) {
+                AccountActions(c: c, busy: model.busy != nil, ask: ask, edit: { editing = $0 })
+            }
+        } primaryAction: { ids in
+            if let id = ids.first { selection = id; showInspector = true }
+        }
         .onChange(of: selection) { _, value in if value != nil { showInspector = true } }
     }
 
-    private func accountRow(_ c: Credential) -> some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 24) {
-                identity(c).frame(width: 220, alignment: .leading)
-                quotaBars(c).frame(width: 260)
-                status(c).frame(width: 112, alignment: .leading)
-                Spacer(minLength: 0)
-            }
-            VStack(alignment: .leading, spacing: 12) {
-                HStack { identity(c); Spacer(); status(c) }
-                quotaBars(c).frame(maxWidth: 300)
-            }
-        }
-        .padding(.vertical, 8)
-        .opacity(c.disabled ? 0.6 : 1)
-    }
-
     private func identity(_ c: Credential) -> some View {
-        HStack(spacing: 10) {
-            ProviderMark(provider: c.provider, size: 24, name: c.providerName)
-            VStack(alignment: .leading, spacing: 4) {
+        HStack(spacing: 8) {
+            ProviderMark(provider: c.provider, size: 18, name: c.providerName)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(c.label.emailHidden).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
-                Text([c.planLabel ?? "Unknown plan", c.org].compactMap { $0 }.joined(separator: " · "))
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 if let duplicate = AccountDirectory.disambiguator(for: c, among: model.credentials) {
-                    Text(duplicate).font(.caption2).foregroundStyle(.tertiary).lineLimit(1).truncationMode(.middle)
+                    Text(duplicate).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
             }
             if model.busy == c.name { ProgressView().controlSize(.small) }
         }
+        .frame(minHeight: 34)
+        .opacity(c.disabled ? 0.6 : 1)
     }
 
     @ViewBuilder private func status(_ c: Credential) -> some View {
@@ -173,15 +184,6 @@ struct AccountsPane: View {
             Label("Team guard", systemImage: "pause.circle").font(.caption).foregroundStyle(.secondary)
                 .help("Paused until \(pause.resetAt.formatted(date: .abbreviated, time: .shortened))")
         } else { StatusLabel(c: c, quota: quota(for: c)).font(.caption) }
-    }
-
-    private func quotaBars(_ c: Credential) -> some View {
-        TimelineView(.periodic(from: .now, by: 30)) { context in
-            HStack(spacing: 14) {
-                AccountQuotaBar(quota: quota(for: c), kind: .session, provider: c.provider, now: context.date)
-                AccountQuotaBar(quota: quota(for: c), kind: .weekly, provider: c.provider, now: context.date)
-            }
-        }
     }
 
     @ViewBuilder private var banner: some View {

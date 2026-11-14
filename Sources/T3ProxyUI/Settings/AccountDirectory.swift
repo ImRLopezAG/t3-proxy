@@ -69,3 +69,47 @@ struct AccountQuotaBar: View {
         .accessibilityElement(children: .combine)
     }
 }
+
+struct AccountQuotaCell: View {
+    let quota: QuotaReading?
+    let kind: QuotaWindowKind
+    let provider: Provider
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+            reading(at: context.date)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(kind.title)
+    }
+
+    @ViewBuilder private func reading(at now: Date) -> some View {
+        let remaining = quota?.remaining(kind, at: now)
+        let window = quota?.accountWindows().first { $0.window.kind == kind }
+        let state = window.flatMap { window in quota.map { WindowState(window, $0, now: now) } }
+        if provider == .other || quota == nil {
+            Text("—").foregroundStyle(.tertiary)
+        } else if let remaining {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 5) {
+                    Text("\(Int(remaining.rounded()))%").monospacedDigit().fontWeight(.medium)
+                        .foregroundStyle(remaining == 0 ? .red : remaining < 10 ? .orange : .primary)
+                    if let reset = quota?.window(kind)?.resetAt {
+                        Text(shortDuration(until: reset, from: now)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }.font(.caption)
+                PaceBar(remaining: remaining, pace: state?.pace,
+                        tint: state?.fill(Theme(scheme).tint(provider)) ?? Theme(scheme).tint(provider))
+                    .frame(height: 3)
+            }
+            .help(quota?.window(kind)?.resetAt.map { "\(kind.title): \(Int(remaining.rounded()))% left · resets \($0.formatted(date: .abbreviated, time: .shortened))" } ?? kind.title)
+        } else if state?.expired == true {
+            Text("Expired").foregroundStyle(.secondary)
+                .help("The last reading's window has reset. It updates on this account's next request.")
+        } else {
+            Text(quota?.source == .live ? "None reported" : "No reading").font(.caption).foregroundStyle(.tertiary)
+                .help("The provider has not reported a current \(kind.title.lowercased()) limit for this account.")
+        }
+    }
+}

@@ -44,6 +44,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // One menu bar item only, and only one running copy.
         let same = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
         if same.count > 1 { NSApp.terminate(nil); return }
+        NotificationCenter.default.publisher(for: NSWindow.didUpdateNotification)
+            .sink { notification in
+                MainActor.assumeIsolated {
+                    if let view = (notification.object as? NSWindow)?.contentView {
+                        AppScrollbars.apply(to: view)
+                    }
+                }
+            }.store(in: &nativeSubscriptions)
         item.button?.image = statusIconImage()
         item.button?.toolTip = "T3 Proxy"
         item.button?.target = self
