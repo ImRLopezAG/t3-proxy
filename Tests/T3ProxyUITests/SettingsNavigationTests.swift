@@ -2,6 +2,21 @@ import Testing
 @testable import T3ProxyUI
 
 @Suite @MainActor struct SettingsNavigationTests {
+    @Test func connectorLinksOpenInsidePlugins() {
+        let router = SettingsRouter()
+        router.pane = .connectors
+        #expect(router.destination == .plugins)
+        #expect(router.pane == .connectors)
+        #expect(router.pluginsTab == .connectors)
+        router.pane = .plugins
+        #expect(router.destination == .plugins)
+        for tab in PluginsTab.allCases {
+            router.pane = tab.landing
+            #expect(router.destination == .plugins)
+            #expect(router.pluginsTab == tab)
+        }
+    }
+
     @Test func monitoringAndAddAccountRoutesStayReachable() {
         let router = SettingsRouter()
         #expect(router.destination == .dashboard)

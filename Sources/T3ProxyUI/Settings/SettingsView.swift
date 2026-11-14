@@ -3,13 +3,12 @@ import AppKit
 import T3ProxyCore
 
 enum SettingsDestination: String, CaseIterable, Identifiable {
-    case dashboard = "Dashboard", accounts = "Accounts", connectors = "Connectors", plugins = "Plugins", settings = "Settings"
+    case dashboard = "Dashboard", accounts = "Accounts", plugins = "Plugins", settings = "Settings"
     var id: Self { self }
     var symbol: String {
         switch self {
         case .dashboard: "chart.xyaxis.line"
         case .accounts: "person.2"
-        case .connectors: "app.connected.to.app.below.fill"
         case .plugins: "puzzlepiece.extension"
         case .settings: "slider.horizontal.3"
         }
@@ -18,9 +17,20 @@ enum SettingsDestination: String, CaseIterable, Identifiable {
         switch self {
         case .dashboard: .dashboard
         case .accounts: .accounts
-        case .connectors: .connectors
         case .plugins: .plugins
         case .settings: .preferences
+        }
+    }
+}
+
+enum PluginsTab: String, CaseIterable, Identifiable {
+    case installed = "Installed", browse = "Browse", connectors = "Connectors"
+    var id: Self { self }
+    var landing: SettingsPane {
+        switch self {
+        case .installed: .plugins
+        case .browse: .pluginBrowse
+        case .connectors: .connectors
         }
     }
 }
@@ -45,14 +55,13 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     case gettingStarted = "Setup", connection = "Connection", accounts = "Accounts", addAccount = "Add Account"
     case quota = "Quota", routing = "Policies", routingEngine = "Engine", notifications = "Notifications"
     case t3code = "T3 Code", usage = "Usage", config = "Configuration", plugins = "Plugins"
-    case connectors = "Connectors", logs = "Diagnostics", proxyDeck = "Deck Migration", system = "Updates"
+    case connectors = "Connectors", pluginBrowse = "Browse Plugins", logs = "Diagnostics", proxyDeck = "Deck Migration", system = "Updates"
     var id: Self { self }
     var destination: SettingsDestination {
         switch self {
         case .dashboard, .quota, .usage: .dashboard
         case .accounts, .addAccount: .accounts
-        case .connectors: .connectors
-        case .plugins: .plugins
+        case .plugins, .pluginBrowse, .connectors: .plugins
         default: .settings
         }
     }
@@ -72,6 +81,13 @@ enum SettingsPane: String, CaseIterable, Identifiable, Hashable {
     @Published var pane: SettingsPane? = .dashboard
     var destination: SettingsDestination { (pane ?? .dashboard).destination }
     var tab: SettingsTab { (pane ?? .preferences).tab }
+    var pluginsTab: PluginsTab {
+        switch pane {
+        case .connectors: .connectors
+        case .pluginBrowse: .browse
+        default: .installed
+        }
+    }
     var addingAccount: Bool {
         get { pane == .addAccount }
         set { pane = newValue ? .addAccount : .accounts }
@@ -109,7 +125,6 @@ public struct SettingsView: View {
             case .dashboard: DashboardPane(monitor: monitor, live: LiveQuotaModel.shared(for: monitor))
             case .accounts: AccountsPane(model: accounts, monitor: monitor)
             case .plugins: PluginsPane(monitor: monitor)
-            case .connectors: ConnectorsPane()
             case .settings: PreferencesPane(monitor: monitor)
             }
         }

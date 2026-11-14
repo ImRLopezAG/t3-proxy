@@ -1,12 +1,36 @@
 import SwiftUI
 import T3ProxyCore
 
-/// Plugin code is downloaded and loaded by the hub. This page only uses its management API.
 struct PluginsPane: View {
     @ObservedObject var monitor: Monitor
+    @ObservedObject private var router = SettingsRouter.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Picker("Plugins category", selection: Binding(get: { router.pluginsTab }, set: { router.pane = $0.landing })) {
+                ForEach(PluginsTab.allCases) { tab in Text(tab.rawValue).tag(tab) }
+            }
+            .pickerStyle(.segmented).labelsHidden().padding(20)
+            Divider()
+            Group {
+                if router.pluginsTab == .connectors {
+                    ConnectorsPane()
+                } else {
+                    HubPluginsPane(monitor: monitor)
+                }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .navigationTitle("Plugins")
+    }
+}
+
+/// Plugin code is downloaded and loaded by the hub. This page only uses its management API.
+private struct HubPluginsPane: View {
+    @ObservedObject var monitor: Monitor
+    @ObservedObject private var router = SettingsRouter.shared
+    private var browse: Bool { router.pluginsTab == .browse }
     @State private var installed: PluginList?
     @State private var store: PluginStore?
-    @State private var browse = false
     @State private var search = ""
     @State private var busy = false
     @State private var error: String?
@@ -28,18 +52,11 @@ struct PluginsPane: View {
                 LockedView(monitor: monitor, what: "plugins")
             } else {
                 HStack {
-                    Picker("Show plugins", selection: $browse) {
-                        Text("Installed").tag(false)
-                        Text("Browse").tag(true)
-                    }.pickerStyle(.segmented).frame(width: 230)
                     Spacer()
                     TextField("Search plugins", text: $search).textFieldStyle(.roundedBorder).frame(maxWidth: 260)
                         .accessibilityLabel("Search plugins")
                 }.padding()
                 Form {
-                    Section {
-                        Button("Manage Client Connectors…") { SettingsRouter.shared.pane = .connectors }
-                    } footer: { Text("This page manages hub plugins. ChatGPT/Claude connectors and local MCP servers belong to each client profile.") }
                     if let error { Section { Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.orange) } }
                     if let notice {
                         Section {
@@ -61,7 +78,6 @@ struct PluginsPane: View {
                 }.formStyle(.grouped)
             }
         }
-        .navigationTitle("Plugins")
         .toolbar {
             ToolbarItemGroup {
                 if busy { ProgressView().controlSize(.small).accessibilityLabel("Loading plugins") }
@@ -74,7 +90,7 @@ struct PluginsPane: View {
             await load()
         }
         .onChange(of: browse) { _, new in
-            if new && store == nil { Task { await load() } }
+            if new ? store == nil : installed == nil { Task { await load() } }
         }
         .confirmationDialog(pending?.title ?? "Change plugin?", isPresented: Binding(
             get: { pending != nil }, set: { if !$0 { pending = nil } }), titleVisibility: .visible) {

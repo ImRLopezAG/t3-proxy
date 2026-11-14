@@ -62,7 +62,7 @@ public struct ConnectorsPane: View {
                 Button("Client Diagnostics…") { diagnostics = true }
             }
         }
-        .formStyle(.grouped).navigationTitle("Connectors")
+        .formStyle(.grouped)
         .task { reload() }.onDisappear { operation?.cancel(); setupModel.cancel() }
         .sheet(isPresented: $adding) { AddMCPConnection { reload(); setup() } }
         .sheet(isPresented: $diagnostics) {
