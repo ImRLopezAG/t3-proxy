@@ -9,6 +9,7 @@ struct QuotaPane: View {
     @ObservedObject private var forecaster = QuotaForecaster.shared
     @State private var plans: [String: PlanInfo] = [:]
     @State private var confirmReset: (account: Account, intent: LiveQuotaModel.ResetIntent)?
+    @State private var confirmClaude: LiveQuotaModel.ClaudeIntent?
 
     var body: some View {
         Group {
@@ -45,6 +46,24 @@ struct QuotaPane: View {
                 Text("Sends the same reset request again. If the first one went through, no second credit is spent.")
             } else {
                 Text("Its 5-hour and weekly Codex limits start over right away. This spends one banked reset\(expiry(a).map { " (the one expiring \($0))" } ?? "") and can't be undone.")
+            }
+        }
+        .confirmationDialog(confirmClaude.map { intent in
+            let name = monitor.accounts.first { $0.id == intent.accountID }.map { live.label(for: $0) } ?? "Claude"
+            return "Use \(intent.confirmation.grant.kind.title.lowercased()) on “\(name)”?"
+        } ?? "Use reset?",
+                            isPresented: Binding(get: { confirmClaude != nil }, set: { if !$0 { confirmClaude = nil } }),
+                            titleVisibility: .visible, presenting: confirmClaude) { intent in
+            Button(live.claudePending[intent.accountID] == nil ? "Use Reset" : "Retry Reset") {
+                Task { await live.useClaudeReset(intent) }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { intent in
+            if live.claudePending[intent.accountID] != nil {
+                Text("Sends the same grant and request again. If the first attempt went through, this won't spend another reset.")
+            } else {
+                let grant = intent.confirmation.grant
+                Text("\(claudeResetEffect(grant)) This uses one banked reset and can't be undone.\(grant.expiresAt.map { " This grant expires \(resetExpiry($0))." } ?? "")")
             }
         }
     }
@@ -138,46 +157,37 @@ struct QuotaPane: View {
 
     @ViewBuilder private func claudeResetRows(now: Date) -> some View {
         ForEach(monitor.accounts.filter { $0.provider == .claude && !$0.disabled }) { a in
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Resets · \(live.label(for: a))").fontWeight(.medium)
-                    Spacer()
-                    Link("Manage in Claude…", destination: URL(string: "https://claude.ai/settings/usage")!)
-                }
-                if let status = a.quota.claudeResets {
-                    let grants = status.grants.filter { $0.isUnexpired(at: now) }
-                    if grants.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(live.label(for: a)).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                let pending = live.claudePending[a.id]
+                let status = a.quota.claudeResets
+                let grants = status?.grants.filter { $0.isUnexpired(at: now) } ?? []
+                if let status {
+                    if grants.isEmpty && pending == nil {
                         Text(status.eligible ? "No banked resets" : "No reset grants reported for this account")
-                            .foregroundStyle(.secondary)
-                    }
-                    ForEach(ClaudeResetKind.allCases, id: \.self) { kind in
-                        let group = grants.filter { $0.kind == kind }
-                        if !group.isEmpty {
-                            DisclosureGroup {
-                                ForEach(group) { grant in
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("\(grant.title) · \(grant.resetsLeft)")
-                                        Text(grant.expiresAt.map { "Expires \(resetExpiry($0))" } ?? "No expiry reported")
-                                            .foregroundStyle(.secondary)
-                                        Text(grant.paused ? "Paused" : status.eligible && grant.usableNow ? "Available now" : "Not currently usable")
-                                            .foregroundStyle(.secondary)
-                                    }.font(.caption).padding(.vertical, 3)
-                                }
-                            } label: {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("\(kind.title) · \(group.reduce(0) { $0 + $1.resetsLeft })")
-                                    if let expiry = group.compactMap(\.expiresAt).min() {
-                                        Text("Next expires \(resetExpiry(expiry))").font(.caption).foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                        }
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 } else {
                     Text(live.refreshing ? "Checking reset credits…" : "Reset credits unavailable")
                         .foregroundStyle(.secondary)
                 }
-            }.padding(.vertical, 4)
+                ForEach(ClaudeResetKind.allCases, id: \.self) { kind in
+                    let group = grants.filter { $0.kind == kind }
+                    let retry = pending?.confirmation.grant.kind == kind ? pending?.confirmation.grant : nil
+                    if let grant = retry ?? group.first(where: { status?.canUse($0, at: now) == true }) ?? group.first {
+                        ClaudeResetRow(grant: grant, grants: group, count: group.reduce(0) { $0 + $1.resetsLeft },
+                                       retry: retry != nil, busy: live.preparingClaude == a.id || live.claiming == a.id,
+                                       enabled: live.claiming == nil && live.preparingClaude == nil && monitor.management == .connected
+                                            && (retry != nil || pending == nil && status?.canUse(grant, at: now) == true)) {
+                            Task {
+                                if let intent = await live.claudeIntent(for: a, grant: grant) { confirmClaude = intent }
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 5)
         }
     }
 
@@ -235,6 +245,69 @@ struct QuotaPane: View {
             }
         }
         return out.map { ($0.key, $0.value.sorted { $0.account < $1.account }) }.sorted { $0.label < $1.label }
+    }
+}
+
+private func claudeResetEffect(_ grant: ClaudeResetGrant) -> String {
+    if grant.givesBackWeekly {
+        return "Returns Fable's contribution to weekly usage."
+            + (grant.clears.contains("five_hour") ? " Also restarts the 5-hour window." : "")
+    }
+    let session = grant.clears.contains("five_hour"), weekly = grant.clears.contains("seven_day")
+    if session && weekly { return "Restarts the 5-hour and weekly limits covered by this grant." }
+    if weekly { return "Restarts the weekly limits covered by this grant." }
+    if session { return "Restarts the 5-hour limits covered by this grant." }
+    return "Resets the usage limits covered by this grant."
+}
+
+private struct ClaudeResetRow: View {
+    let grant: ClaudeResetGrant
+    let grants: [ClaudeResetGrant]
+    let count: Int
+    let retry: Bool
+    let busy: Bool
+    let enabled: Bool
+    let use: () -> Void
+    @State private var details = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 6) {
+                Text(grant.kind.title).fontWeight(.medium)
+                Text(retry ? "Pending" : "\(count)").font(.caption.weight(.semibold)).monospacedDigit()
+                    .padding(.horizontal, 6).padding(.vertical, 1)
+                    .background(.quaternary, in: Capsule())
+            }
+            Text(retry ? "Unconfirmed" : expiry)
+                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Spacer(minLength: 8)
+            Button { details.toggle() } label: { Image(systemName: "info.circle").foregroundStyle(.secondary) }
+                .buttonStyle(.plain).accessibilityLabel("\(grant.kind.title) details")
+                .popover(isPresented: $details, arrowEdge: .trailing) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(grant.kind.title).font(.headline)
+                        Text(claudeResetEffect(grant)).foregroundStyle(.secondary)
+                        ForEach(grants.isEmpty ? [grant] : grants) { g in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("\(g.resetsLeft) available · \(g.title)")
+                                Text(g.expiresAt.map { "Expires \($0.formatted(date: .abbreviated, time: .shortened))" } ?? "No expiry reported")
+                                    .foregroundStyle(.secondary)
+                                if g.paused || !g.usableNow { Text(g.paused ? "Paused" : "Not currently usable").foregroundStyle(.secondary) }
+                            }.font(.caption)
+                        }
+                    }.padding(16).frame(width: 300, alignment: .leading)
+                }
+            if busy { ProgressView().controlSize(.small) }
+            Button(retry ? "Retry Reset…" : "Use Reset…", action: use).disabled(!enabled)
+                .accessibilityLabel("\(retry ? "Retry" : "Use") \(grant.kind.title)…")
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 2)
+    }
+
+    private var expiry: String {
+        guard let date = grants.compactMap(\.expiresAt).min() else { return "No expiry reported" }
+        return "\(grants.count > 1 ? "Next expires" : "Expires") \(date.formatted(.dateTime.month(.abbreviated).day().year()))"
     }
 }
 
