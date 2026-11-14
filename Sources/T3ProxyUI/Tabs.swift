@@ -165,15 +165,26 @@ struct ActiveTab: View {
 
     private func content(now: Date) -> some View {
         let list = c.accounts.filter { !$0.held } + c.accounts.filter(\.held)
+        let providers = Provider.allCases.filter { provider in list.contains { $0.provider == provider } }
         return VStack(alignment: .leading, spacing: 0) {
             HStack { SectionTitle(text: "Accounts"); Spacer(); Pill(text: c.held > 0 ? "\(c.active) active · \(c.held) held" : "\(list.count)") }.padding(.vertical, 8)
             if !c.hasAccounts { Note(text: accountsHint(c)).padding(.bottom, 4) }
             else if list.isEmpty { Note(text: "No accounts.") }
             let rows = VStack(spacing: 0) {
-                ForEach(list) { a in
-                    AccountRow(account: a, now: now, sample: c.isSample, heldLine: heldLine(a, now: now),
-                               endpoint: c.endpoint, connected: c.management == .connected)
-                    if a != list.last { Rule() }
+                ForEach(providers, id: \.self) { provider in
+                    let group = list.filter { $0.provider == provider }
+                    HStack(spacing: 5) {
+                        Text(provider.title).font(.system(size: 10, weight: .semibold))
+                        Text("\(group.count)").font(.system(size: 9)).monospacedDigit()
+                        Spacer()
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.top, provider == providers.first ? 4 : 10).padding(.bottom, 2)
+                    ForEach(group) { a in
+                        AccountRow(account: a, now: now, sample: c.isSample, heldLine: heldLine(a, now: now),
+                                   endpoint: c.endpoint, connected: c.management == .connected)
+                        if a != group.last { Rule() }
+                    }
                 }
             }
             // ImageRenderer cannot draw a ScrollView; sample stills lay the rows out directly.
@@ -213,8 +224,6 @@ struct AccountRow: View {
                     .layoutPriority(1)
                 if a.held {
                     Text(heldLine).font(.system(size: 9.5)).foregroundStyle(.orange).lineLimit(1)
-                } else if a.nickname != nil {
-                    Text(a.name.emailHidden).font(.system(size: 9.5)).foregroundStyle(t.secondary).lineLimit(1).truncationMode(.middle)
                 }
                 Spacer(minLength: 0)
                 if !sample, let live = LiveQuotaModel.primary {
