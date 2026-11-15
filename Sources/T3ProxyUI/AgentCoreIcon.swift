@@ -16,7 +16,31 @@ import T3ProxyCore
     private var state: AgentActivity = .idle
     private var attention = false
     private var reduced = false
+    private var preferences: AgentIconPreferences?
     private var rendered: (pixels: Int, dark: Bool, tint: Int, animated: Bool)?
+
+    func configure(_ preferences: AgentIconPreferences) {
+        guard self.preferences != preferences else { return }
+        self.preferences = preferences
+        update(state: state, attention: attention, reduceMotion: reduced)
+    }
+
+    private func selectedColor(_ tint: AgentOrbTint) -> AgentIconColor? {
+        guard let preferences else { return nil }
+        if preferences.colorMode == .custom {
+            switch tint {
+            case .blue: return preferences.activeColor
+            case .orange: return preferences.attentionColor
+            case .red: return preferences.errorColor
+            }
+        }
+        guard tint == .blue else { return nil }
+        var foreground = NSColor.labelColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            foreground = NSColor.labelColor.usingColorSpace(.sRGB) ?? (dark ? .white : .black)
+        }
+        return AgentIconColor(foreground)
+    }
 
     public override init(frame: NSRect) {
         super.init(frame: frame)
@@ -71,7 +95,7 @@ import T3ProxyCore
     }
 
     private func glow(_ tint: AgentOrbTint) -> (halo: [CGColor], nucleus: [CGColor]) {
-        let (_, mid, front) = AgentOrbRenderer.palette(tint, dark: true)
+        let (_, mid, front) = AgentOrbRenderer.palette(tint, dark: dark, color: selectedColor(tint))
         let haloA: CGFloat = dark ? 0.42 : 0.28
         return ([Self.color(mid, haloA), Self.color(mid, haloA * 0.28), Self.color(mid, 0)],
                 [Self.color(front, 1), Self.color(mid, 0.8), Self.color(mid, 0)])
@@ -82,8 +106,8 @@ import T3ProxyCore
         let g = glow(tint)
         halo.colors = g.halo; halo.locations = [0, 0.45, 1]
         nucleus.colors = g.nucleus
-        for (part, layer) in shells { layer.contents = AgentOrbRenderer.still(part, pixels: pixels, dark: dark, tint: tint) }
-        let (_, mid, front) = AgentOrbRenderer.palette(tint, dark: dark)
+        for (part, layer) in shells { layer.contents = AgentOrbRenderer.still(part, pixels: pixels, dark: dark, tint: tint, color: selectedColor(tint)) }
+        let (_, mid, front) = AgentOrbRenderer.palette(tint, dark: dark, color: selectedColor(tint))
         rings[0].strokeColor = Self.color(dark ? front : mid, 1)
         rings[1].strokeColor = Self.color(mid, 0.8)
         CATransaction.commit()
@@ -118,7 +142,7 @@ import T3ProxyCore
     }
 
     private func spinAnimation(_ part: AgentOrbPart, tint: AgentOrbTint, period: Double) -> CAKeyframeAnimation? {
-        let frames = AgentOrbRenderer.frames(part, pixels: pixels, dark: dark, tint: tint)
+        let frames = AgentOrbRenderer.frames(part, pixels: pixels, dark: dark, tint: tint, color: selectedColor(tint))
         guard frames.count > 1 else { return nil }
         let spin = CAKeyframeAnimation(keyPath: "contents")
         spin.values = frames + [frames[0]]
@@ -232,8 +256,13 @@ import T3ProxyCore
     private var effectTask: Task<Void, Never>?
     private var observations: Set<AnyCancellable> = []
     private var overlay = false
-    public init(button: NSStatusBarButton) {
+    private let defaults: UserDefaults
+    private var preferences: AgentIconPreferences
+    public init(button: NSStatusBarButton, defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        preferences = AgentIconPreferences(defaults: defaults)
         self.button = button
+        view.configure(preferences)
         button.addSubview(view)
         NotificationCenter.default.publisher(for: NSView.frameDidChangeNotification, object: button)
             .sink { [weak self] _ in MainActor.assumeIsolated { self?.layout() } }.store(in: &observations)
@@ -247,6 +276,19 @@ import T3ProxyCore
                     self.refresh()
                 }
             }.store(in: &observations)
+        NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification, object: defaults)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.reloadPreferences() }
+            }.store(in: &observations)
+        refresh()
+    }
+    private func reloadPreferences() {
+        let next = AgentIconPreferences(defaults: defaults)
+        guard preferences != next else { return }
+        preferences = next
+        effectTask?.cancel(); overlay = false
+        view.configure(next)
         refresh()
     }
     public func apply(_ next: AgentActivityUpdate) {
@@ -256,7 +298,7 @@ import T3ProxyCore
         button?.toolTip = status + (next.threadTitle.map { "\n\($0)" } ?? "")
         button?.setAccessibilityLabel(status)
         if changed { refresh() }
-        guard let effect = next.effect else { return }
+        guard preferences.style == .orb, let effect = next.effect else { return }
         effectTask?.cancel(); overlay = true; display()
         view.play(effect, reduceMotion: reduced)
         effectTask = Task { [weak self] in
@@ -271,13 +313,47 @@ import T3ProxyCore
         view.needsLayout = true
     }
     private func refresh() {
-        view.update(state: update.state, attention: update.needsAttention, reduceMotion: reduced)
+        view.update(state: preferences.style == .classic ? .idle : update.state, attention: update.needsAttention, reduceMotion: reduced)
         display()
     }
     private func display() {
+        if preferences.style == .classic {
+            view.isHidden = true
+            button?.image = Self.classicImage(attention: update.needsAttention)
+            layout()
+            return
+        }
         let idle = update.state == .idle && !overlay && !update.needsAttention
         view.isHidden = idle
         button?.image = idle ? AgentCoreView.templateImage() : NSImage(size: NSSize(width: 18, height: 18))
         layout()
+    }
+
+    public static func classicImage(attention: Bool = false) -> NSImage {
+        let img = NSImage(size: NSSize(width: 22, height: 18), flipped: true) { _ in
+            let ink: NSColor = attention ? .labelColor : .black
+            let font = NSFont.systemFont(ofSize: 11.5, weight: .heavy)
+            let s = NSAttributedString(string: "T3", attributes: [.font: font, .foregroundColor: ink])
+            let w = s.size().width
+            s.draw(at: NSPoint(x: (22 - w) / 2, y: -0.5))
+            ink.set()
+            let p = NSBezierPath()
+            p.lineWidth = 1.2
+            p.move(to: NSPoint(x: 3.5, y: 14))
+            p.line(to: NSPoint(x: 8, y: 14))
+            p.curve(to: NSPoint(x: 11, y: 16), controlPoint1: NSPoint(x: 9.5, y: 14), controlPoint2: NSPoint(x: 9.5, y: 16))
+            p.curve(to: NSPoint(x: 14, y: 14), controlPoint1: NSPoint(x: 12.5, y: 16), controlPoint2: NSPoint(x: 12.5, y: 14))
+            p.line(to: NSPoint(x: 18.5, y: 14))
+            p.stroke()
+            for x in [3.0, 19.0] { NSBezierPath(ovalIn: NSRect(x: x - 1.5, y: 12.5, width: 3, height: 3)).fill() }
+            if attention {
+                NSColor.systemOrange.setFill()
+                NSBezierPath(ovalIn: NSRect(x: 17, y: 0.5, width: 5, height: 5)).fill()
+            }
+            return true
+        }
+        img.isTemplate = !attention
+        img.accessibilityDescription = attention ? "T3 Proxy, a thread needs you" : "T3 Proxy"
+        return img
     }
 }

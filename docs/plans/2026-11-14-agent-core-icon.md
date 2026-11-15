@@ -24,3 +24,8 @@ The first source review found completed background rosters could keep a finished
 
 ## Artwork revision
 Opus 5.5 through Claude Proxy produced the accepted layered hologram structure. Native perspective projections of broken translucent shells use blue as the main palette, red error energy, and an orange Needs you orb without a dot. Report draws energy inward into a core bloom; finish opens the shells and reassembles them. Core Animation plays cached frames with no app-side frame timer. Synthetic previews demonstrate the artwork separately from live event behavior.
+
+## Menu bar appearance preferences
+Settings → T3 Proxy → General → Menu bar offers Animated orb or Classic T3. The default orb matches the status view's effective menu bar appearance; attention remains orange and errors red. Custom mode stores independent opaque sRGB colors for active, attention and error states. Idle keeps a native template image. Changes apply to the existing status button, preserving the selected quota title and clicks. Classic mode stops hidden orb animations. Arbitrary custom color atlases share a cache bounded to 64 MiB; the render server may separately retain frames currently animating.
+
+Preferences tests establish malformed-value defaults, persistence, real rendered color and appearance changes, Reduce Motion, and notification-driven switching of an existing native status button. Earlier activity and rendering proof tests remain unchanged. Streaming still has no live text-delta signal.

@@ -11,24 +11,36 @@ enum AgentOrbTint: Int, CaseIterable { case blue, orange, red }
 
 @MainActor enum AgentOrbRenderer {
     static let frameCount = 72
-    private struct Key: Hashable { let part: AgentOrbPart; let pixels: Int; let dark: Bool; let tint: AgentOrbTint }
+    private struct Key: Hashable { let part: AgentOrbPart; let pixels: Int; let dark: Bool; let tint: AgentOrbTint; let color: AgentIconColor? }
     private static var cache: [Key: [CGImage]] = [:]
+    private static let cacheLimit = 64 * 1024 * 1024
+    private static var cacheOrder: [Key] = []
+    private(set) static var cacheBytes = 0
     private static var models: [Int: Model] = [:]
 
-    static func frames(_ part: AgentOrbPart, pixels: Int, dark: Bool, tint: AgentOrbTint = .blue) -> [CGImage] {
-        let key = Key(part: part, pixels: pixels, dark: dark, tint: tint)
+    static func frames(_ part: AgentOrbPart, pixels: Int, dark: Bool, tint: AgentOrbTint = .blue, color: AgentIconColor? = nil) -> [CGImage] {
+        let key = Key(part: part, pixels: pixels, dark: dark, tint: tint, color: color)
         if let hit = cache[key] { return hit }
         let made = (0..<frameCount).compactMap {
-            render(part, pixels: pixels, dark: dark, tint: tint, angle: Float($0) / Float(frameCount) * 2 * .pi)
+            render(part, pixels: pixels, dark: dark, tint: tint, color: color, angle: Float($0) / Float(frameCount) * 2 * .pi)
         }
-        cache[key] = made
+        let cost = made.reduce(0) { $0 + $1.bytesPerRow * $1.height }
+        if cost <= cacheLimit {
+            while cacheBytes + cost > cacheLimit, !cacheOrder.isEmpty {
+                let oldest = cacheOrder.removeFirst()
+                if let removed = cache.removeValue(forKey: oldest) {
+                    cacheBytes -= removed.reduce(0) { $0 + $1.bytesPerRow * $1.height }
+                }
+            }
+            cache[key] = made; cacheOrder.append(key); cacheBytes += cost
+        }
         return made
     }
 
     /// Static still used for Reduce Motion; avoids building the whole sequence.
-    static func still(_ part: AgentOrbPart, pixels: Int, dark: Bool, tint: AgentOrbTint = .blue) -> CGImage? {
-        if let hit = cache[Key(part: part, pixels: pixels, dark: dark, tint: tint)]?.first { return hit }
-        return render(part, pixels: pixels, dark: dark, tint: tint, angle: 0)
+    static func still(_ part: AgentOrbPart, pixels: Int, dark: Bool, tint: AgentOrbTint = .blue, color: AgentIconColor? = nil) -> CGImage? {
+        if let hit = cache[Key(part: part, pixels: pixels, dark: dark, tint: tint, color: color)]?.first { return hit }
+        return render(part, pixels: pixels, dark: dark, tint: tint, color: color, angle: 0)
     }
 
     /// Single composite (outer + inner + core) with alpha boosted for a legible menu-bar template.
@@ -175,7 +187,12 @@ enum AgentOrbTint: Int, CaseIterable { case blue, orange, red }
     // MARK: Rendering
 
     /// Depth ramp (back → mid → front). Dark: additive, ending in near-white. Light: deep inks that read on a pale bar.
-    static func palette(_ tint: AgentOrbTint, dark: Bool) -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) {
+    static func palette(_ tint: AgentOrbTint, dark: Bool, color: AgentIconColor? = nil) -> (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>) {
+        if let color {
+            let mid = color.rgb
+            return dark ? (mid * 0.45, mid, mid * 0.35 + SIMD3(repeating: 0.65))
+                : (mid * 0.8, mid, mid * 0.65)
+        }
         switch (tint, dark) {
         case (.blue, true): return ([0.08, 0.22, 0.78], [0.22, 0.62, 1.0], [0.86, 0.96, 1.0])
         case (.blue, false): return ([0.10, 0.30, 0.75], [0.0, 0.40, 0.92], [0.0, 0.24, 0.66])
@@ -192,9 +209,9 @@ enum AgentOrbTint: Int, CaseIterable { case blue, orange, red }
                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
     }
 
-    private static func render(_ part: AgentOrbPart, pixels: Int, dark: Bool, tint: AgentOrbTint, angle: Float) -> CGImage? {
+    private static func render(_ part: AgentOrbPart, pixels: Int, dark: Bool, tint: AgentOrbTint, color: AgentIconColor? = nil, angle: Float) -> CGImage? {
         guard let ctx = context(pixels) else { return nil }
-        draw(part, in: ctx, pixels: pixels, dark: dark, tint: tint, angle: angle, boost: 1)
+        draw(part, in: ctx, pixels: pixels, dark: dark, tint: tint, color: color, angle: angle, boost: 1)
         return ctx.makeImage()
     }
 
@@ -210,20 +227,20 @@ enum AgentOrbTint: Int, CaseIterable { case blue, orange, red }
         }
     }
 
-    private static func draw(_ part: AgentOrbPart, in ctx: CGContext, pixels: Int, dark: Bool, tint: AgentOrbTint, angle: Float, boost: Float) {
+    private static func draw(_ part: AgentOrbPart, in ctx: CGContext, pixels: Int, dark: Bool, tint: AgentOrbTint, color: AgentIconColor? = nil, angle: Float, boost: Float) {
         let high = pixels >= 80
         guard let geo = model(detail: high).parts[part] else { return }
         let rot = rotation(part, angle: angle)
         let size = Float(pixels), radius = size * 0.36, cam: Float = 6
         let weight = max(0.55, size / 200)
+        let (back, mid, front) = palette(tint, dark: dark, color: color)
         func project(_ v: SIMD3<Float>) -> (CGPoint, Float) {
             let w = rot * v
             let s = cam / (cam - w.z)
             return (CGPoint(x: CGFloat(size / 2 + w.x * s * radius), y: CGFloat(size / 2 + w.y * s * radius)), max(0, min(1, (w.z + 1.1) / 2.2)))
         }
-        func color(depth z: Float, tone: Float, alpha: Float) -> CGColor {
+        func ink(depth z: Float, tone: Float, alpha: Float) -> CGColor {
             let k = max(0, min(1, z * 0.85 + tone * 0.3))
-            let (back, mid, front) = palette(tint, dark: dark)
             let c = k < 0.6 ? simd_mix(back, mid, SIMD3(repeating: k / 0.6)) : simd_mix(mid, front, SIMD3(repeating: (k - 0.6) / 0.4))
             let depthAlpha = 0.16 + 0.84 * pow(z, 1.4)
             return CGColor(srgbRed: CGFloat(c.x), green: CGFloat(c.y), blue: CGFloat(c.z), alpha: CGFloat(min(1, alpha * depthAlpha * boost * (dark ? 1 : 1.6))))
@@ -236,7 +253,7 @@ enum AgentOrbTint: Int, CaseIterable { case blue, orange, red }
             let pts = plate.points.map(project)
             let z = pts.map(\.1).reduce(0, +) / Float(pts.count)
             ctx.beginPath(); ctx.addLines(between: pts.map(\.0)); ctx.closePath()
-            ctx.setFillColor(color(depth: z, tone: plate.tone * 0.6, alpha: (high ? 0.11 : 0.16) * partAlpha))
+            ctx.setFillColor(ink(depth: z, tone: plate.tone * 0.6, alpha: (high ? 0.11 : 0.16) * partAlpha))
             ctx.fillPath()
         }
         for trace in geo.traces {
@@ -246,15 +263,15 @@ enum AgentOrbTint: Int, CaseIterable { case blue, orange, red }
             let width = CGFloat(weight * trace.width * (0.65 + 0.6 * z))
             if dark && high {   // soft bloom halo under each trace
                 ctx.addPath(path); ctx.setLineWidth(width * 3.2)
-                ctx.setStrokeColor(color(depth: z, tone: trace.tone, alpha: 0.12 * partAlpha)); ctx.strokePath()
+                ctx.setStrokeColor(ink(depth: z, tone: trace.tone, alpha: 0.12 * partAlpha)); ctx.strokePath()
             }
             ctx.addPath(path); ctx.setLineWidth(width)
-            ctx.setStrokeColor(color(depth: z, tone: trace.tone, alpha: (high ? 0.8 : 0.9) * partAlpha)); ctx.strokePath()
+            ctx.setStrokeColor(ink(depth: z, tone: trace.tone, alpha: (high ? 0.8 : 0.9) * partAlpha)); ctx.strokePath()
         }
         for dot in geo.dots {
             let (p, z) = project(dot)
             let r = CGFloat(weight * (0.5 + 0.9 * z))
-            ctx.setFillColor(color(depth: z, tone: 1, alpha: 0.9 * partAlpha))
+            ctx.setFillColor(ink(depth: z, tone: 1, alpha: 0.9 * partAlpha))
             ctx.fillEllipse(in: CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r))
         }
     }

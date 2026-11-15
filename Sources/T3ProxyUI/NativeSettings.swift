@@ -112,12 +112,36 @@ private struct NativeShortcutRecorder: NSViewRepresentable {
 
 struct NativeConnectionSections: View {
     @AppStorage("nativeMenuBarMode") private var menuMode = NativeMenuBarMode.icon.rawValue
+    @AppStorage("agentIcon.style") private var iconStyle = "orb"
+    @AppStorage("agentIcon.colors") private var iconColors = "menuBar"
+    @AppStorage("agentIcon.activeColor") private var activeColor = "389EFF"
+    @AppStorage("agentIcon.attentionColor") private var attentionColor = "FF9924"
+    @AppStorage("agentIcon.errorColor") private var errorColor = "FF382E"
     @ObservedObject private var shortcut = NativePanelShortcut.shared
     @State private var loginStatus = SMAppService.mainApp.status
     @State private var loginError: String?
     @Environment(\.scenePhase) private var scenePhase
     var body: some View {
         Section("Menu bar") {
+            Picker("Icon", selection: $iconStyle) {
+                Text("Animated orb").tag("orb")
+                Text("Classic T3").tag("classic")
+            }
+            if iconStyle == "orb" {
+                Picker("Colors", selection: $iconColors) {
+                    Text("Match menu bar").tag("menuBar")
+                    Text("Custom").tag("custom")
+                }
+                if iconColors == "custom" {
+                    ColorPicker("Active", selection: iconColor($activeColor), supportsOpacity: false)
+                    ColorPicker("Needs you", selection: iconColor($attentionColor), supportsOpacity: false)
+                    ColorPicker("Error", selection: iconColor($errorColor), supportsOpacity: false)
+                }
+                Text(iconColors == "custom"
+                     ? "Choose colors that contrast with your menu bar. Idle follows the menu bar; Reduce Motion keeps the orb still."
+                     : "Follows the menu bar appearance. Needs you stays orange and errors red. Respects Reduce Motion.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Picker("Show", selection: $menuMode) {
                 ForEach(NativeMenuBarMode.allCases, id: \.rawValue) { Text($0.label).tag($0.rawValue) }
             }
@@ -149,6 +173,10 @@ struct NativeConnectionSections: View {
         .onAppear { loginStatus = SMAppService.mainApp.status }
         .onChange(of: scenePhase) { _, _ in loginStatus = SMAppService.mainApp.status }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in loginStatus = SMAppService.mainApp.status }
+    }
+    private func iconColor(_ value: Binding<String>) -> Binding<Color> {
+        Binding(get: { Color(nsColor: AgentIconColor(hex: value.wrappedValue).nsColor) },
+                set: { value.wrappedValue = AgentIconColor(NSColor($0)).hex })
     }
     private var loginLabel: String {
         switch loginStatus { case .enabled: "Enabled"; case .notRegistered: "Off"; case .requiresApproval: "Approval required in Login Items"; case .notFound: "App unavailable for registration"; @unknown default: "Unknown" }
