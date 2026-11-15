@@ -27,6 +27,7 @@ struct AgentIconPreferences: Equatable {
     var style: AgentIconStyle
     var colorMode: AgentIconColorMode
     var activeColor: AgentIconColor
+    var backgroundColor: AgentIconColor
     var attentionColor: AgentIconColor
     var errorColor: AgentIconColor
 
@@ -34,6 +35,7 @@ struct AgentIconPreferences: Equatable {
         style = AgentIconStyle(rawValue: defaults.string(forKey: "agentIcon.style") ?? "") ?? .orb
         colorMode = AgentIconColorMode(rawValue: defaults.string(forKey: "agentIcon.colors") ?? "") ?? .menuBar
         activeColor = AgentIconColor(hex: defaults.string(forKey: "agentIcon.activeColor") ?? "389EFF")
+        backgroundColor = AgentIconColor(hex: defaults.string(forKey: "agentIcon.backgroundColor") ?? "A57BFF")
         attentionColor = AgentIconColor(hex: defaults.string(forKey: "agentIcon.attentionColor") ?? "FF9924")
         errorColor = AgentIconColor(hex: defaults.string(forKey: "agentIcon.errorColor") ?? "FF382E")
     }

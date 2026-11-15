@@ -115,6 +115,7 @@ struct NativeConnectionSections: View {
     @AppStorage("agentIcon.style") private var iconStyle = "orb"
     @AppStorage("agentIcon.colors") private var iconColors = "menuBar"
     @AppStorage("agentIcon.activeColor") private var activeColor = "389EFF"
+    @AppStorage("agentIcon.backgroundColor") private var backgroundColor = "A57BFF"
     @AppStorage("agentIcon.attentionColor") private var attentionColor = "FF9924"
     @AppStorage("agentIcon.errorColor") private var errorColor = "FF382E"
     @ObservedObject private var shortcut = NativePanelShortcut.shared
@@ -134,12 +135,13 @@ struct NativeConnectionSections: View {
                 }
                 if iconColors == "custom" {
                     ColorPicker("Active", selection: iconColor($activeColor), supportsOpacity: false)
+                    ColorPicker("Background", selection: iconColor($backgroundColor), supportsOpacity: false)
                     ColorPicker("Needs you", selection: iconColor($attentionColor), supportsOpacity: false)
                     ColorPicker("Error", selection: iconColor($errorColor), supportsOpacity: false)
                 }
                 Text(iconColors == "custom"
-                     ? "Choose colors that contrast with your menu bar. Idle follows the menu bar; Reduce Motion keeps the orb still."
-                     : "Follows the menu bar appearance. Needs you stays orange and errors red. Respects Reduce Motion.")
+                     ? "Work, background activity and requests can appear together. Idle follows the menu bar; Reduce Motion keeps the orb still."
+                     : "Work follows the menu bar appearance. Background activity is purple, needs you orange and errors red. Respects Reduce Motion.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Picker("Show", selection: $menuMode) {

@@ -17,23 +17,32 @@ import T3ProxyCore
     private var attention = false
     private var reduced = false
     private var preferences: AgentIconPreferences?
-    private var rendered: (pixels: Int, dark: Bool, tint: Int, animated: Bool)?
+    private var delegated = false
+    private var working = false
+    private var snoozed = false
+    private var errorActive = false
+    private var staticEffect = false
+    private struct SurfaceStyle: Equatable {
+        let pixels: Int; let dark: Bool; let tint: AgentOrbTint; let color: AgentIconColor?
+    }
+    private var rendered: [AgentOrbPart: SurfaceStyle] = [:]
+    private var phases: [AgentOrbPart: Double] = [:]
 
     func configure(_ preferences: AgentIconPreferences) {
         guard self.preferences != preferences else { return }
         self.preferences = preferences
-        update(state: state, attention: attention, reduceMotion: reduced)
+        restyle()
     }
 
     private func selectedColor(_ tint: AgentOrbTint) -> AgentIconColor? {
-        guard let preferences else { return nil }
-        if preferences.colorMode == .custom {
+        if let preferences, preferences.colorMode == .custom && !(state == .idle && !needsYou && !errorActive) {
             switch tint {
             case .blue: return preferences.activeColor
             case .orange: return preferences.attentionColor
             case .red: return preferences.errorColor
             }
         }
+        if preferences == nil && state != .idle { return nil }
         guard tint == .blue else { return nil }
         var foreground = NSColor.labelColor
         effectiveAppearance.performAsCurrentDrawingAppearance {
@@ -51,8 +60,10 @@ import T3ProxyCore
             g.type = .radial; g.startPoint = CGPoint(x: 0.5, y: 0.5); g.endPoint = CGPoint(x: 1, y: 1)
         }
         orb.addSublayer(halo)
+        halo.name = "orb.halo"; nucleus.name = "orb.nucleus"
         for part in [AgentOrbPart.inner, .core, .outer, .ring] {
             let shell = shells[part]!
+            shell.name = "orb.\(part)"
             shell.contentsGravity = .resizeAspect
             orb.addSublayer(shell)
             if part == .core { orb.addSublayer(nucleus) }
@@ -66,10 +77,25 @@ import T3ProxyCore
 
     private var dark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
     private var pixels: Int { max(8, Int((bounds.width * (window?.backingScaleFactor ?? 2)).rounded())) }
-    /// Waiting, or any state while a thread needs you, is orange; everything else is blue.
-    private var baseTint: AgentOrbTint { state == .waiting || attention ? .orange : .blue }
+    private var needsYou: Bool { state == .waiting || attention }
+    private func dormant(_ part: AgentOrbPart) -> Bool {
+        snoozed && !errorActive && (part == .core || (part == .inner && !needsYou))
+    }
+    /// Concurrent concerns occupy separate surfaces: work outside, attention inside, error at the core.
+    private func tint(for part: AgentOrbPart) -> AgentOrbTint {
+        if errorActive && (part == .inner || part == .core || state == .idle) { return .red }
+        if needsYou && (part == .inner || part == .core || (!working && !delegated)) { return .orange }
+        return .blue
+    }
+    private func surfaceColor(_ part: AgentOrbPart, tint: AgentOrbTint) -> AgentIconColor? {
+        if dormant(part) { return AgentIconColor(hex: dark ? "B8C5D1" : "53616E") }
+        if part == .ring && delegated && tint != .red {
+            return preferences?.colorMode == .custom ? preferences?.backgroundColor : AgentIconColor(hex: "A57BFF")
+        }
+        return selectedColor(tint)
+    }
 
-    public override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); rendered = nil; restyle() }
+    public override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); restyle() }
     public override func viewDidChangeBackingProperties() { super.viewDidChangeBackingProperties(); restyle() }
 
     public override func layout() {
@@ -101,38 +127,110 @@ import T3ProxyCore
                 [Self.color(front, 1), Self.color(mid, 0.8), Self.color(mid, 0)])
     }
 
-    private func applyTint(_ tint: AgentOrbTint) {
-        CATransaction.begin(); CATransaction.setDisableActions(true)
-        let g = glow(tint)
-        halo.colors = g.halo; halo.locations = [0, 0.45, 1]
-        nucleus.colors = g.nucleus
-        for (part, layer) in shells { layer.contents = AgentOrbRenderer.still(part, pixels: pixels, dark: dark, tint: tint, color: selectedColor(tint)) }
-        let (_, mid, front) = AgentOrbRenderer.palette(tint, dark: dark, color: selectedColor(tint))
-        rings[0].strokeColor = Self.color(dark ? front : mid, 1)
-        rings[1].strokeColor = Self.color(mid, 0.8)
-        CATransaction.commit()
+    private func phase(of layer: CALayer, fallback: Double) -> Double {
+        guard let spin = layer.animation(forKey: "spin"), spin.duration > 0 else { return fallback }
+        let turns = (layer.convertTime(CACurrentMediaTime(), from: nil) - spin.beginTime) / spin.duration
+        return turns - floor(turns)
     }
 
-    /// Model values for the base state. Only rebuilt when size, appearance, tint or motion actually change.
+    private func period(for part: AgentOrbPart) -> Double {
+        if state == .streaming || errorActive { return Self.streamingPeriods[part] ?? 7 }
+        let slow = !working
+        return (slow ? [.outer: 40.0, .inner: 30, .core: 12, .ring: 6]
+                     : [.outer: 22.0, .inner: 15, .core: 6, .ring: 3.2])[part] ?? 20
+    }
+
+    /// Build atlases before sampling time; expensive first-use rendering must not advance the pose.
+    /// Each surface has its own local clock. Unchanged animations stay installed.
     private func restyle() {
         guard bounds.width > 0 else { return }
-        let animate = state != .idle && !reduced
-        let want = (pixels, dark, baseTint.rawValue, animate)
-        if let r = rendered, r == want { return }
-        rendered = want
-        applyTint(baseTint)
-        if animate { startMotion() }
+        let animate = (state != .idle || errorActive) && !reduced
+        let styles = Dictionary(uniqueKeysWithValues: AgentOrbPart.allCases.map { part in
+            let tint = tint(for: part)
+            return (part, SurfaceStyle(pixels: pixels, dark: dark, tint: tint, color: surfaceColor(part, tint: tint)))
+        })
+        var atlases: [AgentOrbPart: [CGImage]] = [:]
+        for part in AgentOrbPart.allCases {
+            let style = styles[part]!
+            let shell = shells[part]!
+            let spinning = animate && !dormant(part) && (part != .ring || delegated)
+            if rendered[part] != style || (spinning && shell.animation(forKey: "spin") == nil) {
+                atlases[part] = spinning
+                    ? AgentOrbRenderer.frames(part, pixels: pixels, dark: dark, tint: style.tint, color: style.color)
+                    : []
+            }
+        }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        for part in AgentOrbPart.allCases {
+            let shell = shells[part]!, style = styles[part]!
+            let spinning = animate && !dormant(part) && (part != .ring || delegated)
+            let spin = shell.animation(forKey: "spin")
+            let changed = rendered[part] != style
+            guard changed || (spinning ? spin?.duration != period(for: part) : spin != nil) else { continue }
+            let pose = phase(of: shell, fallback: phases[part] ?? 0)
+            phases[part] = pose
+            let frames = atlases[part] ?? (spin as? CAKeyframeAnimation)?.values?.map { $0 as! CGImage } ?? []
+            if animate && changed && rendered[part] != nil {
+                let fade = CATransition(); fade.type = .fade; fade.duration = 0.24
+                shell.add(fade, forKey: "palette")
+            }
+            shell.removeAnimation(forKey: "spin")
+            if !frames.isEmpty {
+                shell.contents = frames[min(Int(pose * Double(AgentOrbRenderer.frameCount)), frames.count - 1)]
+            } else {
+                shell.contents = AgentOrbRenderer.still(part, pixels: pixels, dark: dark, tint: style.tint,
+                                                       color: style.color, phase: pose)
+            }
+            if spinning && !frames.isEmpty {
+                let animation = CAKeyframeAnimation(keyPath: "contents")
+                animation.values = Array(frames.prefix(AgentOrbRenderer.frameCount)) + [frames[0]]
+                animation.calculationMode = .linear; animation.duration = period(for: part)
+                animation.repeatCount = .infinity
+                animation.beginTime = shell.convertTime(CACurrentMediaTime(), from: nil) - pose * animation.duration
+                shell.add(animation, forKey: "spin")
+            }
+        }
+        rendered = styles
+        let glowTint: AgentOrbTint = errorActive ? .red : needsYou ? .orange : .blue
+        let g = glow(glowTint)
+        if animate { CATransaction.setDisableActions(false); CATransaction.setAnimationDuration(0.24) }
+        halo.colors = needsYou ? glow(.orange).halo : g.halo
+        halo.locations = [0, 0.45, 1]; nucleus.colors = g.nucleus
+        let (_, mid, front) = AgentOrbRenderer.palette(glowTint, dark: dark, color: selectedColor(glowTint))
+        rings[0].strokeColor = Self.color(dark ? front : mid, 1); rings[1].strokeColor = Self.color(mid, 0.8)
+        nucleus.opacity = snoozed && state == .idle && !errorActive ? 0.18 : 1
+        halo.opacity = snoozed && state == .idle && !errorActive ? 0.08 : 1
+        CATransaction.commit()
+        updateBreathing(animate: animate)
     }
 
     public func update(state: AgentActivity, attention: Bool, reduceMotion: Bool) {
+        update(AgentActivityUpdate(state: state, needsAttention: attention), reduceMotion: reduceMotion)
+    }
+
+    public func update(_ activity: AgentActivityUpdate, reduceMotion: Bool) {
+        let state = activity.state, attention = activity.needsAttention
         self.state = state; self.attention = attention; reduced = reduceMotion
-        stopAll()
+        working = activity.hasWorkingThread; delegated = activity.hasDelegatedWork
+        snoozed = activity.snoozedThreadCount > 0
+        if staticEffect { finishEffect() }
+        if reduced || (state == .idle && !errorActive) {
+            for (part, shell) in shells { phases[part] = phase(of: shell, fallback: phases[part] ?? 0) }
+            stopAll()
+            rendered = [:]
+        }
         CATransaction.begin(); CATransaction.setDisableActions(true)
-        rings.forEach { $0.opacity = 0 }
-        shells[.ring]?.isHidden = state != .subagent
-        orb.opacity = state == .idle ? 0.6 : 1
+        if let ring = shells[.ring] {
+            let target: Float = delegated ? 1 : 0
+            if ring.opacity != target && !reduced && state != .idle {
+                let fade = CABasicAnimation(keyPath: "opacity")
+                fade.fromValue = ring.presentation()?.opacity ?? ring.opacity; fade.toValue = target; fade.duration = 0.24
+                ring.add(fade, forKey: "visibility")
+            }
+            ring.isHidden = false; ring.opacity = target
+        }
+        orb.opacity = state == .idle && !errorActive ? 0.6 : 1
         CATransaction.commit()
-        rendered = nil
         restyle()
     }
 
@@ -141,99 +239,99 @@ import T3ProxyCore
         if let layer { strip(layer) }
     }
 
-    private func spinAnimation(_ part: AgentOrbPart, tint: AgentOrbTint, period: Double) -> CAKeyframeAnimation? {
-        let frames = AgentOrbRenderer.frames(part, pixels: pixels, dark: dark, tint: tint, color: selectedColor(tint))
-        guard frames.count > 1 else { return nil }
-        let spin = CAKeyframeAnimation(keyPath: "contents")
-        spin.values = frames + [frames[0]]
-        spin.calculationMode = .linear
-        spin.duration = period
-        spin.repeatCount = .infinity
-        return spin
-    }
-
     private static let streamingPeriods: [AgentOrbPart: Double] = [.outer: 7, .inner: 5, .core: 2.4, .ring: 2.2]
 
     /// Shell spin: each layer cycles through its own true-3D frames; inner counter-rotates against outer.
     /// With attention, the strongest active motion is kept and only the colour turns orange.
-    private func startMotion() {
-        stopAll()
-        let fast = state == .streaming, waiting = state == .waiting
-        let periods: [AgentOrbPart: Double] = fast ? Self.streamingPeriods
-            : waiting ? [.outer: 40, .inner: 30, .core: 12, .ring: 6] : [.outer: 22, .inner: 15, .core: 6, .ring: 3.2]
-        for (part, layer) in shells where !(part == .ring && state != .subagent) {
-            if let spin = spinAnimation(part, tint: baseTint, period: periods[part] ?? 20) { layer.add(spin, forKey: "spin") }
-        }
-        // Breathing core light on the visible nucleus + halo. Waiting breathes slow and deep.
+    private func updateBreathing(animate: Bool) {
+        guard animate else { nucleus.removeAnimation(forKey: "breath"); halo.removeAnimation(forKey: "breath"); return }
+        let fast = state == .streaming, waiting = needsYou
+        // One shared brightness curve preserves brightness as the breathing speed changes.
         let breath = CAKeyframeAnimation(keyPath: "opacity")
-        breath.values = fast ? [0.6, 1, 0.7, 1, 0.6] : waiting ? [0.3, 1, 0.3] : [0.6, 1, 0.6]
+        breath.values = [0.55, 1, 0.55]
         breath.duration = fast ? 0.9 : waiting ? 2.2 : 3.2
         breath.repeatCount = .infinity
         breath.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        nucleus.add(breath, forKey: "breath")
-        halo.add(breath, forKey: "breath")
+        for layer in [nucleus, halo] {
+            if layer.animation(forKey: "breath")?.duration == breath.duration { continue }
+            let old = layer.animation(forKey: "breath")
+            let now = layer.convertTime(CACurrentMediaTime(), from: nil)
+            let turns = old.map { (now - $0.beginTime) / $0.duration } ?? 0
+            breath.beginTime = now - (turns - floor(turns)) * breath.duration
+            layer.add(breath, forKey: "breath")
+        }
+    }
+
+    /// Remove only overlays. State, palette and speed restoration use the same phase-preserving path.
+    public func finishEffect() {
+        for layer in [orb, halo, nucleus] + Array(shells.values) + rings {
+            for key in layer.animationKeys() ?? [] where !["spin", "breath", "visibility", "palette"].contains(key) {
+                layer.removeAnimation(forKey: key)
+            }
+        }
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        rings.forEach { $0.opacity = 0 }
+        CATransaction.commit()
+        errorActive = false; staticEffect = false
+        restyle()
+        if state == .idle || reduced { stopAll() }
     }
 
     /// Bounded one-shot effects (≤ 1.5 s). They never touch model values when animating, so the base
     /// tint and any running spin show through untouched once they end. Reduce Motion: static frame only,
     /// cleared by the next `update`.
     public func play(_ effect: AgentEffect, reduceMotion: Bool) {
+        finishEffect()
+        errorActive = effect == .error
+        staticEffect = reduceMotion
+        if errorActive { restyle() }
+        guard !reduceMotion else {
+            CATransaction.begin(); CATransaction.setDisableActions(true)
+            if effect == .report { rings[0].opacity = 1 }
+            if effect == .finished { rings[1].opacity = 1 }
+            CATransaction.commit()
+            return
+        }
         let now = CACurrentMediaTime()
-        func anim(_ path: String, _ values: [Any], _ times: [NSNumber]? = nil, duration: Double, delay: Double = 0) -> CAKeyframeAnimation {
+        func add(_ layer: CALayer, _ key: String, _ path: String, _ values: [Any],
+                 _ times: [NSNumber]? = nil, duration: Double, delay: Double = 0, additive: Bool = false) {
             let a = CAKeyframeAnimation(keyPath: path)
             a.values = values; a.keyTimes = times; a.duration = duration
-            a.beginTime = now + delay; a.fillMode = .backwards
+            a.beginTime = layer.convertTime(now + delay, from: nil); a.fillMode = .backwards
+            a.isAdditive = additive
             a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            return a
-        }
-        guard !reduceMotion else {
-            switch effect {
-            case .error: applyTint(.red)
-            case .report: CATransaction.begin(); CATransaction.setDisableActions(true); rings[0].opacity = 1; CATransaction.commit()
-            case .finished: CATransaction.begin(); CATransaction.setDisableActions(true); rings[1].opacity = 1; CATransaction.commit()
-            }
-            return
+            layer.add(a, forKey: key)
         }
         switch effect {
         case .report:
-            // Energy arrives: two rings collapse inward one after another, then the core blooms ice-white.
+            // Incoming energy converges on the core; underlying shell rotation keeps going.
             for (i, ring) in rings.enumerated() {
                 let d = Double(i) * 0.18
-                ring.add(anim("transform.scale", [1.35, 0.12], duration: 0.6, delay: d), forKey: "converge")
-                ring.add(anim("opacity", [0, 1, 0], [0, 0.35, 1], duration: 0.6, delay: d), forKey: "convergeFade")
+                add(ring, "converge", "transform.scale", [1.35, 0.12], duration: 0.6, delay: d)
+                add(ring, "convergeFade", "opacity", [0, 1, 0], [0, 0.35, 1], duration: 0.6, delay: d)
             }
-            nucleus.add(anim("transform.scale", [1, 1, 2.8, 1], [0, 0.4, 0.6, 1], duration: 1.4), forKey: "bloom")
-            nucleus.add(anim("opacity", [1, 1, 1, 1], duration: 1.4), forKey: "bloomOpacity")
-            halo.add(anim("opacity", [0.5, 0.5, 1, 0.6], [0, 0.4, 0.6, 1], duration: 1.4), forKey: "bloomHalo")
-            orb.add(anim("transform.scale", [1, 0.9, 1.06, 1], [0, 0.42, 0.62, 1], duration: 1.4), forKey: "gather")
+            add(nucleus, "bloom", "transform.scale", [1, 1, 2.8, 1], [0, 0.4, 0.6, 1], duration: 1.4)
+            add(nucleus, "bloomOpacity", "opacity", [0, 0, 0.5, 0], [0, 0.4, 0.6, 1], duration: 1.4, additive: true)
+            add(halo, "bloomHalo", "opacity", [0, 0, 0.4, 0], [0, 0.4, 0.6, 1], duration: 1.4, additive: true)
+            add(orb, "gather", "transform.scale", [1, 0.9, 1.06, 1], [0, 0.42, 0.62, 1], duration: 1.4)
         case .finished:
-            // Graceful opening: outer shell lifts away and fades, inner shell drifts, core glows; then reassembles.
-            let open: [(AgentOrbPart, Double)] = [(.outer, 1.32), (.ring, 1.4), (.inner, 1.16), (.core, 0.8)]
-            for (part, scale) in open {
-                shells[part]?.add(anim("transform.scale", [1, scale, scale, 1], [0, 0.35, 0.55, 1], duration: 1.5), forKey: "open")
-                shells[part]?.add(anim("opacity", [1, part == .core ? 1 : 0.25, part == .core ? 1 : 0.25, 1], [0, 0.35, 0.55, 1], duration: 1.5), forKey: "openFade")
+            for (part, scale) in [(AgentOrbPart.outer, 1.32), (.ring, 1.4), (.inner, 1.16), (.core, 0.8)] {
+                let shell = shells[part]!
+                add(shell, "open", "transform.scale", [1, scale, scale, 1], [0, 0.35, 0.55, 1], duration: 1.5)
+                // Additive opacity preserves an absent delegated ring throughout the effect.
+                add(shell, "openFade", "opacity", [0, part == .core ? 0 : -0.75, part == .core ? 0 : -0.75, 0],
+                    [0, 0.35, 0.55, 1], duration: 1.5, additive: true)
             }
-            rings[1].add(anim("transform.scale", [0.7, 1.25], duration: 0.9), forKey: "release")
-            rings[1].add(anim("opacity", [0, 0.9, 0], [0, 0.25, 1], duration: 0.9), forKey: "releaseFade")
-            nucleus.add(anim("transform.scale", [1, 1.6, 1.6, 1], [0, 0.35, 0.55, 1], duration: 1.5), forKey: "settle")
+            add(rings[1], "release", "transform.scale", [0.7, 1.25], duration: 0.9)
+            add(rings[1], "releaseFade", "opacity", [0, 0.9, 0], [0, 0.25, 1], duration: 0.9)
+            add(nucleus, "settle", "transform.scale", [1, 1.6, 1.6, 1], [0, 0.35, 0.55, 1], duration: 1.5)
         case .error:
-            // Whole orb turns red with streaming energy for one bounded burst, plus a short shake.
-            let duration = 1.4
-            for (part, layer) in shells where !(part == .ring && state != .subagent) {
-                guard let spin = spinAnimation(part, tint: .red, period: Self.streamingPeriods[part] ?? 5) else { continue }
-                spin.repeatCount = Float(duration / spin.duration); spin.beginTime = now
-                layer.add(spin, forKey: "errorSpin")   // overrides base contents only while running
-            }
-            let g = glow(.red)
-            halo.add(anim("colors", [g.halo, g.halo], duration: duration), forKey: "errorHalo")
-            nucleus.add(anim("colors", [g.nucleus, g.nucleus], duration: duration), forKey: "errorCore")
-            nucleus.add(anim("opacity", [0.5, 1, 0.5, 1, 0.5, 1], duration: duration), forKey: "errorFlicker")
-            let s = bounds.width / 18
-            orb.add(anim("transform.translation.x", [0, -1.1 * s, 1.1 * s, -0.6 * s, 0.3 * s, 0], duration: 0.45), forKey: "shake")
+            // Speed and colour enter/leave through restyle(), preserving phase at both boundaries.
+            add(nucleus, "errorFlicker", "opacity", [0, 0.4, -0.2, 0.4, -0.2, 0], duration: 1.4, additive: true)
         }
     }
 
-    /// Rasterized once from the same 3D geometry (depth → alpha). Idle needs neither layers nor timers.
+    /// Static template for callers that need an NSImage representation of the orb.
     public static func templateImage() -> NSImage { idleTemplate }
     private static let idleTemplate: NSImage = {
         let image = NSImage(size: NSSize(width: 18, height: 18))
@@ -255,7 +353,6 @@ import T3ProxyCore
     private var reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     private var effectTask: Task<Void, Never>?
     private var observations: Set<AnyCancellable> = []
-    private var overlay = false
     private let defaults: UserDefaults
     private var preferences: AgentIconPreferences
     public init(button: NSStatusBarButton, defaults: UserDefaults = .standard) {
@@ -272,7 +369,7 @@ import T3ProxyCore
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-                    self.effectTask?.cancel(); self.overlay = false
+                    self.effectTask?.cancel(); self.view.finishEffect()
                     self.refresh()
                 }
             }.store(in: &observations)
@@ -287,24 +384,26 @@ import T3ProxyCore
         let next = AgentIconPreferences(defaults: defaults)
         guard preferences != next else { return }
         preferences = next
-        effectTask?.cancel(); overlay = false
+        effectTask?.cancel(); view.finishEffect()
         view.configure(next)
         refresh()
     }
     public func apply(_ next: AgentActivityUpdate) {
         let changed = update.state != next.state || update.needsAttention != next.needsAttention
+            || update.hasWorkingThread != next.hasWorkingThread || update.hasDelegatedWork != next.hasDelegatedWork
+            || update.snoozedThreadCount != next.snoozedThreadCount || update.hasWaitingThread != next.hasWaitingThread
         update = next
-        let status = "T3 Proxy — \(next.state.label)" + (next.needsAttention && next.state != .waiting ? " · Needs you" : "")
+        let status = "T3 Proxy — \(next.label)"
         button?.toolTip = status + (next.threadTitle.map { "\n\($0)" } ?? "")
         button?.setAccessibilityLabel(status)
         if changed { refresh() }
         guard preferences.style == .orb, let effect = next.effect else { return }
-        effectTask?.cancel(); overlay = true; display()
+        effectTask?.cancel(); display()
         view.play(effect, reduceMotion: reduced)
         effectTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(1.6))
             guard !Task.isCancelled, let self else { return }
-            self.overlay = false; self.refresh()
+            self.view.finishEffect(); self.refresh()
         }
     }
     public func layout() {
@@ -313,7 +412,7 @@ import T3ProxyCore
         view.needsLayout = true
     }
     private func refresh() {
-        view.update(state: preferences.style == .classic ? .idle : update.state, attention: update.needsAttention, reduceMotion: reduced)
+        view.update(preferences.style == .classic ? AgentActivityUpdate() : update, reduceMotion: reduced)
         display()
     }
     private func display() {
@@ -323,9 +422,10 @@ import T3ProxyCore
             layout()
             return
         }
-        let idle = update.state == .idle && !overlay && !update.needsAttention
-        view.isHidden = idle
-        button?.image = idle ? AgentCoreView.templateImage() : NSImage(size: NSSize(width: 18, height: 18))
+        // Keep the same geometry at its last angle through idle; a template/live swap used to snap.
+        // The static layers follow menu-bar foreground appearance and do no recurring work.
+        view.isHidden = false
+        button?.image = NSImage(size: NSSize(width: 18, height: 18))
         layout()
     }
 

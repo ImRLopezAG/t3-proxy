@@ -4,6 +4,19 @@ import T3ProxyCore
 @testable import T3ProxyUI
 
 @Suite @MainActor struct AgentIconPreferencesTests {
+    @Test func backgroundColorDefaultsAndCustomColorPersistIndependently() throws {
+        let name = "t3-background-color-test-\(UUID())"
+        let defaults = try #require(UserDefaults(suiteName: name))
+        defer { defaults.removePersistentDomain(forName: name) }
+        #expect(AgentIconPreferences(defaults: defaults).backgroundColor.hex == "A57BFF")
+        defaults.set("11CC77", forKey: "agentIcon.backgroundColor")
+        defaults.set("CC1177", forKey: "agentIcon.activeColor")
+        let preferences = AgentIconPreferences(defaults: defaults)
+        #expect(preferences.backgroundColor.hex == "11CC77")
+        #expect(preferences.activeColor.hex == "CC1177")
+        #expect(AgentIconPreferences(defaults: defaults) == preferences)
+    }
+
     @Test func defaultsAndInvalidPreferencesKeepThemeMatching() throws {
         let defaults = try #require(UserDefaults(suiteName: "t3-icon-test-\(UUID())"))
         defaults.set("unrecognized", forKey: "agentIcon.style")

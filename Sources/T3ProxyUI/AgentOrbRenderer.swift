@@ -38,9 +38,11 @@ enum AgentOrbTint: Int, CaseIterable { case blue, orange, red }
     }
 
     /// Static still used for Reduce Motion; avoids building the whole sequence.
-    static func still(_ part: AgentOrbPart, pixels: Int, dark: Bool, tint: AgentOrbTint = .blue, color: AgentIconColor? = nil) -> CGImage? {
-        if let hit = cache[Key(part: part, pixels: pixels, dark: dark, tint: tint, color: color)]?.first { return hit }
-        return render(part, pixels: pixels, dark: dark, tint: tint, color: color, angle: 0)
+    static func still(_ part: AgentOrbPart, pixels: Int, dark: Bool, tint: AgentOrbTint = .blue, color: AgentIconColor? = nil, phase: Double = 0) -> CGImage? {
+        if let hit = cache[Key(part: part, pixels: pixels, dark: dark, tint: tint, color: color)], !hit.isEmpty {
+            return hit[min(Int(phase * Double(frameCount)), hit.count - 1)]
+        }
+        return render(part, pixels: pixels, dark: dark, tint: tint, color: color, angle: Float(phase) * 2 * .pi)
     }
 
     /// Single composite (outer + inner + core) with alpha boosted for a legible menu-bar template.
