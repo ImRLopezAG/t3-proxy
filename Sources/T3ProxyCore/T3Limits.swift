@@ -199,7 +199,10 @@ public struct T3LimitsHandler: Sendable {
                 }
                 guard (body["method"] == nil || body["method"] is NSNull || body["method"] is String),
                       let target = [LiveQuotaTarget.claudeUsage, .codexUsage, .codexCredits, .codexConsume].first(where: {
-                    $0.provider.rawValue == account.provider && $0.url == body["url"] as? String && $0.method == (body["method"] as? String ?? "GET")
+                    // T3 still sends the original URL. Both spellings map to our fixed reset-aware GET.
+                    let matchesURL = $0.url == body["url"] as? String
+                        || ($0 == .claudeUsage && body["url"] as? String == "https://api.anthropic.com/api/oauth/usage")
+                    return $0.provider.rawValue == account.provider && matchesURL && $0.method == (body["method"] as? String ?? "GET")
                 }), (body["data"] == nil || body["data"] is String), Self.validData(body["data"] as? String, target: target) else {
                     return .error(403, "Only T3 Code's limit reads and Codex reset credits are allowed.")
                 }

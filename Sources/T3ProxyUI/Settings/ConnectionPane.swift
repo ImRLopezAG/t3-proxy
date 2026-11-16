@@ -12,11 +12,8 @@ struct ConnectionPane: View {
     @State private var portDraft = ""
     @State private var portError: String?
 
-    private static let intervals: [(String, TimeInterval)] = [("30 seconds", 30), ("1 minute", 60), ("2 minutes", 120), ("5 minutes", 300)]
-
     var body: some View {
         Form {
-            NativeConnectionSections()
             Section {
                 LabeledContent("Endpoint") { Text(monitor.endpointLabel).monospaced().textSelection(.enabled) }
                 LabeledContent("Port") {
@@ -33,9 +30,6 @@ struct ConnectionPane: View {
                 }
                 if let portError { Label(portError, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red) }
                 LabeledContent("Status") { reachability }
-                Picker("Refresh every", selection: $monitor.interval) {
-                    ForEach(Self.intervals, id: \.1) { Text($0.0).tag($0.1) }
-                }
             } header: {
                 Text("Proxy")
             } footer: {
@@ -66,14 +60,6 @@ struct ConnectionPane: View {
                 Text("Management")
             } footer: {
                 Text("Stored in the Keychain on this Mac only and sent only to 127.0.0.1. After a rejected key, T3 Proxy sends nothing until the key changes, because repeated failures make the proxy block this Mac for 30 minutes.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            Section {
-                LabeledContent("T3 Proxy") {
-                    Button("Quit T3 Proxy") { NSApp.terminate(nil) }
-                }
-            } footer: {
-                Text("Quitting closes only this app; the proxy keeps running. You can also right-click the menu bar icon.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
         }

@@ -2,7 +2,7 @@ import Foundation
 import Combine
 import T3ProxyCore
 
-/// Drives live quota reads (every 5 minutes, and on demand) and the Codex reset-credit flow.
+/// Drives live quota reads (every 5 minutes, and on demand) and provider reset-credit flows.
 /// Live reads go through the hub's api-call with the account's own token; the service throttles
 /// each account to one read a minute and two hub calls at a time.
 ///
@@ -36,7 +36,16 @@ public final class LiveQuotaModel: ObservableObject {
         public let accountID: String
         fileprivate let authIndex: String?
         fileprivate let chatgptAccountID: String?
+        fileprivate let routingDisabled: Bool
         fileprivate let creditID: String
+        fileprivate let keyEpoch: Int
+    }
+
+    public struct ClaudeIntent: Equatable {
+        public let accountID: String
+        public let confirmation: ClaudeResetConfirmation
+        fileprivate let accountName: String
+        fileprivate let authIndex: String?
         fileprivate let keyEpoch: Int
     }
 
@@ -49,7 +58,7 @@ public final class LiveQuotaModel: ObservableObject {
     public func intent(for account: Account) -> ResetIntent? {
         guard let credit = pending[account.id]?.credit ?? credits[account.id]?.first else { return nil }
         return ResetIntent(accountID: account.id, authIndex: account.authIndex, chatgptAccountID: account.chatgptAccountID,
-                           creditID: credit.id, keyEpoch: keyEpoch)
+                           routingDisabled: account.disabled, creditID: credit.id, keyEpoch: keyEpoch)
     }
 
     @Published public private(set) var refreshing = false
@@ -58,6 +67,8 @@ public final class LiveQuotaModel: ObservableObject {
     @Published public private(set) var credits: [String: [ResetCredit]] = [:]
     @Published public private(set) var pending: [String: PendingReset] = [:]
     @Published public private(set) var claiming: String?
+    @Published public private(set) var preparingClaude: String?
+    @Published public private(set) var claudePending: [String: ClaudeIntent] = [:]
     @Published public var outcome: Outcome?
 
     private let monitor: Monitor
@@ -100,12 +111,12 @@ public final class LiveQuotaModel: ObservableObject {
     private func syncEpoch() {
         let keyChanged = keyEpoch != monitor.keyEpoch
         let noAccess = monitor.management == .rejected || monitor.management == .noKey
-        guard keyChanged || (noAccess && (!credits.isEmpty || !pending.isEmpty || outcome != nil || refreshing)) else { return }
+        guard keyChanged || (noAccess && (!credits.isEmpty || !pending.isEmpty || !claudePending.isEmpty || outcome != nil || refreshing)) else { return }
         keyEpoch = monitor.keyEpoch
         epoch += 1
         service = LiveQuotaService(monitor: monitor)
         confirmations = ResetCreditConfirmationStore()
-        credits = [:]; creditsReadAt = [:]; pending = [:]; outcome = nil
+        credits = [:]; creditsReadAt = [:]; pending = [:]; claudePending = [:]; outcome = nil
     }
 
     public func label(for account: Account) -> String { account.quotaLabel(among: monitor.accounts) }
@@ -117,11 +128,11 @@ public final class LiveQuotaModel: ObservableObject {
         guard !refreshing, monitor.management == .connected else { return }
         refreshing = true; defer { refreshing = false }
         let started = epoch, svc = service
-        let readings = await svc.refresh(monitor.accounts)
+        let readings = await svc.refresh(monitor.accounts, includeDisabledCodex: true)
         guard started == epoch else { return }
         monitor.applyLive(readings, epoch: keyEpoch)
         lastRefresh = Date()
-        for a in monitor.accounts where a.provider == .codex && !a.disabled {
+        for a in monitor.accounts where a.provider == .codex {
             guard started == epoch else { return }
             let count = readings[a.id]?.availableResetCredits
             if count == 0 { credits[a.id] = []; continue }
@@ -129,6 +140,80 @@ public final class LiveQuotaModel: ObservableObject {
             creditsReadAt[a.id] = Date()
             if let list = try? await svc.resetCredits(a), started == epoch { credits[a.id] = list }
         }
+    }
+
+    /// Refresh the exact grant and same-account organization before presenting the confirmation.
+    public func claudeIntent(for account: Account, grant: ClaudeResetGrant) async -> ClaudeIntent? {
+        syncEpoch()
+        guard claiming == nil, preparingClaude == nil, monitor.management == .connected else { return nil }
+        if let pending = claudePending[account.id] {
+            return pending.confirmation.grant.id == grant.id && validClaudeAccount(pending) ? pending : nil
+        }
+        let started = epoch, key = keyEpoch, svc = service
+        preparingClaude = account.id; defer { preparingClaude = nil }
+        do {
+            let confirmation = try await svc.prepareClaudeReset(account: account, grantID: grant.id)
+            syncEpoch()
+            let intent = ClaudeIntent(accountID: account.id, confirmation: confirmation, accountName: account.name,
+                                      authIndex: account.authIndex, keyEpoch: key)
+            guard started == epoch, validClaudeAccount(intent) else { return nil }
+            return intent
+        } catch {
+            syncEpoch()
+            guard started == epoch else { return nil }
+            outcome = .init(accountID: account.id, text: "That reset couldn't be verified as available. Refresh the quota and try again.", isError: true)
+            return nil
+        }
+    }
+
+    private func validClaudeAccount(_ intent: ClaudeIntent) -> Bool {
+        guard monitor.keyEpoch == intent.keyEpoch, monitor.management == .connected,
+              let a = current(intent.accountID) else { return false }
+        return a.provider == .claude && !a.disabled && a.name == intent.accountName && a.authIndex == intent.authIndex
+    }
+
+    /// Only called by the confirmation button. An uncertain claim pins the grant and request for manual retry.
+    public func useClaudeReset(_ intent: ClaudeIntent) async {
+        syncEpoch()
+        guard claiming == nil, validClaudeAccount(intent), let account = current(intent.accountID) else { return }
+        let id = account.id, grant = intent.confirmation.grant
+        guard claudePending[id].map({ $0 == intent }) ?? grant.isUnexpired(at: Date()) else { return }
+        let started = epoch, svc = service
+        claiming = id; outcome = nil; defer { claiming = nil }
+        var dispatched = false
+        let result: ClaudeResetResult
+        do {
+            result = try await svc.consumeClaudeReset(account: account, confirmed: intent.confirmation.confirm()) { [weak self] in
+                guard let self, self.validClaudeAccount(intent),
+                      self.claudePending[id].map({ $0 == intent }) ?? grant.isUnexpired(at: Date()) else { return false }
+                dispatched = true
+                return true
+            }
+        } catch {
+            syncEpoch()
+            guard started == epoch else { return }
+            guard dispatched else {
+                outcome = .init(accountID: id, text: "The account or reset changed while waiting. Nothing was used.", isError: true)
+                return
+            }
+            result = .unconfirmed
+        }
+        syncEpoch()
+        guard started == epoch else { return }
+        claudePending[id] = result == .unconfirmed ? intent : nil
+        let name = label(for: account), text: String
+        switch result {
+        case .reset: text = "\(grant.kind.title) used on \(name)."
+        case .alreadyUsed: text = "That reset was already used on \(name). No other grant was spent."
+        case .notLimited: text = "\(name) doesn't need that reset right now. No reset was used."
+        case .cooldown: text = "Claude asked you to wait before using another reset. No reset was used."
+        case .ineligible, .unavailable: text = "Claude says that reset isn't available right now. The quota was refreshed."
+        case .unconfirmed: text = "The reset on \(name) wasn't confirmed. Retry sends the same grant and request again."
+        }
+        let warning = result == .reset && svc.cooldownClearFailed.contains(id)
+            ? " The proxy's cooldown couldn't be cleared; it clears on its own." : ""
+        outcome = .init(accountID: id, text: text + warning, isError: ![.reset, .alreadyUsed].contains(result), succeeded: result == .reset)
+        await refresh()
     }
 
     /// Spends a reset on `account`: the unfinished one if there is one, otherwise the soonest-expiring credit.
@@ -139,9 +224,10 @@ public final class LiveQuotaModel: ObservableObject {
         syncEpoch()
         let accountID = intent.accountID
         guard claiming == nil else { return .notAttempted }
-        // Re-check the account as it is now: still there, enabled, Codex, same credential.
-        guard let account = current(accountID), account.provider == .codex, !account.disabled else {
-            outcome = .init(accountID: accountID, text: "That account is disabled or gone, so no reset was used.", isError: true)
+        // Confirmed manual resets may target paused Codex subscriptions; automatic resume still requires enabled routing.
+        guard let account = current(accountID), account.provider == .codex,
+              account.disabled == intent.routingDisabled, (!requireExhausted || !account.disabled) else {
+            outcome = .init(accountID: accountID, text: "That account or its routing status changed, so no reset was used.", isError: true)
             return .notAttempted
         }
         // The credential, the key and the credit must be the ones the user confirmed.
@@ -153,10 +239,16 @@ public final class LiveQuotaModel: ObservableObject {
         let name = label(for: account)
         let attempt: PendingReset
         if let p = pending[accountID] {
-            attempt = p
+            // This method follows a fresh confirmation bound to the current routing state.
+            // Preserve the original credit, request and credential identity for an uncertain retry.
+            guard let confirmed = try? p.confirmed.prepareRetry(account: account).confirm() else {
+                outcome = .init(accountID: accountID, text: "The original reset belongs to another credential. Restore that account to check its outcome; no new request was sent.", isError: true)
+                return .notAttempted
+            }
+            attempt = PendingReset(credit: p.credit, confirmed: confirmed)
         } else {
             guard let credit = credits[accountID]?.first,
-                  let prepared = try? confirmations.prepare(credit: credit, account: account) else { return .notAttempted }
+                  let prepared = try? confirmations.prepare(credit: credit, account: account, allowDisabled: true) else { return .notAttempted }
             attempt = PendingReset(credit: credit, confirmed: prepared.confirm())
         }
         claiming = accountID; defer { claiming = nil }
@@ -167,7 +259,7 @@ public final class LiveQuotaModel: ObservableObject {
             result = try await svc.consume(account: account, confirmed: attempt.confirmed) { [weak self] in
                 guard let self, self.monitor.keyEpoch == intent.keyEpoch,
                       self.monitor.management == .connected,
-                      let current = self.current(accountID), current.provider == .codex, !current.disabled,
+                      let current = self.current(accountID), current.provider == .codex, current.disabled == intent.routingDisabled,
                       self.intent(for: current) == intent else { return false }
                 let credit = self.pending[accountID]?.credit ?? self.credits[accountID]?.first
                 guard credit == attempt.credit else { return false }
@@ -194,6 +286,7 @@ public final class LiveQuotaModel: ObservableObject {
             var text = windows > 0
                 ? "Reset used on \(name): \(windows) limit\(windows == 1 ? "" : "s") started over."
                 : "Reset used on \(name)."
+            if account.disabled { text += " Routing remains paused." }
             if svc.cooldownClearFailed.contains(accountID) { text += " The hub's cooldown for it couldn't be cleared; it clears on its own." }
             outcome = .init(accountID: accountID, text: text, isError: false, succeeded: true)
         case .alreadyRedeemed?:

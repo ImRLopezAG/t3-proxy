@@ -138,7 +138,7 @@ final class AccountsModel: ObservableObject {
 
     static func describe(_ e: Error) -> String {
         switch e {
-        case ManagementError.locked: "No accepted management key. Set one in Connection."
+        case ManagementError.locked: "No accepted management key. Set one in Settings → CLIProxyAPI → Connection."
         case ManagementError.invalidName: "The account's file name is not one T3 Proxy will send."
         case ManagementError.invalidPriority: "Priority must be a whole number from -100 to 100."
         case ManagementError.nicknameTooLong: "Keep the nickname to 60 characters or fewer."

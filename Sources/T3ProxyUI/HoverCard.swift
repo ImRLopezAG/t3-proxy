@@ -6,7 +6,7 @@ import SwiftUI
 /// The panel is a non-activating NSPanel, where SwiftUI popovers and `.help` cards are unreliable. The card is
 /// its own borderless glass panel attached as a child window, positioned next to the main panel at the row's height
 /// (left of the panel, or right when there's no room). AppKit tracking areas with `.activeAlways` drive it, so it
-/// works whether or not the panel is key. It never takes focus or clicks.
+/// works whether or not the panel is key. Cards are passive by default; quota details opt into buttons.
 @MainActor
 final class HoverCardController {
     static let shared = HoverCardController()
@@ -17,9 +17,10 @@ final class HoverCardController {
     private weak var pending: NSView?
     private var showTask: Task<Void, Never>?
     private var hideTask: Task<Void, Never>?
+    private var interactive = false
     private let gap: CGFloat = 8
 
-    func enter(_ view: NSView, content: @escaping () -> AnyView) {
+    func enter(_ view: NSView, interactive: Bool = false, content: @escaping () -> AnyView) {
         hideTask?.cancel(); hideTask = nil
         // Moving between rows while a card is up swaps it at once; the first card waits briefly.
         let delay: Duration = panel?.isVisible == true ? .milliseconds(60) : .milliseconds(450)
@@ -29,7 +30,7 @@ final class HoverCardController {
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled, let self, let view, self.pending === view, Self.pointerInside(view) else { return }
             self.pending = nil
-            self.show(content(), for: view)
+            self.show(content(), for: view, interactive: interactive)
         }
     }
 
@@ -37,19 +38,28 @@ final class HoverCardController {
         // Leaving a row that is still waiting cancels its card, whichever card is showing.
         if pending === view { showTask?.cancel(); showTask = nil; pending = nil }
         guard anchor === view || anchor == nil else { return }
-        hideTask?.cancel()
-        hideTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard !Task.isCancelled else { return }
-            self?.hide()
-        }
+        scheduleHide()
     }
 
     /// Keyboard / VoiceOver: show this row's card now, or close it if it is the one showing.
-    func toggle(_ view: NSView, content: () -> AnyView) {
+    func toggle(_ view: NSView, interactive: Bool = false, content: () -> AnyView) {
         if anchor === view, panel?.isVisible == true { hide(); return }
         showTask?.cancel(); hideTask?.cancel(); pending = nil
-        show(content(), for: view)
+        show(content(), for: view, interactive: interactive)
+    }
+
+    func cardEntered() { hideTask?.cancel(); hideTask = nil }
+    func cardExited() { scheduleHide() }
+
+    private func scheduleHide() {
+        hideTask?.cancel()
+        hideTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(220))
+            guard !Task.isCancelled, let self else { return }
+            if self.interactive, let panel = self.panel, panel.isVisible, panel.frame.contains(NSEvent.mouseLocation) { return }
+            if let anchor = self.anchor, Self.pointerInside(anchor) { return }
+            self.hide()
+        }
     }
 
     private static func pointerInside(_ view: NSView) -> Bool {
@@ -83,7 +93,7 @@ final class HoverCardController {
         p.hidesOnDeactivate = false
         p.isReleasedWhenClosed = false
         p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
-        let host = NSHostingView(rootView: AnyView(EmptyView()))
+        let host = InteractiveHoverHost(rootView: AnyView(EmptyView()))
         let glass = NSGlassEffectView()
         glass.cornerRadius = 14
         glass.contentView = host
@@ -98,32 +108,87 @@ final class HoverCardController {
         return (p, host)
     }
 
-    private func show(_ content: AnyView, for view: NSView) {
+    private func show(_ content: AnyView, for view: NSView, interactive: Bool) {
         guard let window = view.window, window.isVisible else { return }
         if panel == nil { (panel, host) = makePanel() }
         guard let panel, let host else { return }
+        self.interactive = interactive
+        panel.ignoresMouseEvents = !interactive
         anchor = view
-        host.rootView = AnyView(content.frame(width: 300, alignment: .leading).padding(14).fixedSize(horizontal: false, vertical: true))
+        let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? window.frame
+        host.rootView = AnyView(HoverCardViewport(content: content, maximumHeight: screen.height - 8) { [weak self, weak view] height in
+            guard let self, let view, self.anchor === view else { return }
+            self.positionPanel(size: NSSize(width: 328, height: height), for: view)
+        }.id(ObjectIdentifier(view)))
         host.layoutSubtreeIfNeeded()
         let size = host.fittingSize
+        positionPanel(size: size, for: view)
+        if panel.parent !== window { panel.parent?.removeChildWindow(panel); window.addChildWindow(panel, ordered: .above) }
+        panel.orderFront(nil)
+        panel.invalidateShadow()
+    }
+
+    private func positionPanel(size: NSSize, for view: NSView) {
+        guard let panel, let window = view.window, window.isVisible else { return }
         let row = window.convertToScreen(view.convert(view.bounds, to: nil))
         let main = window.frame
         let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? main
         var x = main.minX - gap - size.width
         if x < screen.minX + 4 { x = main.maxX + gap }
+        x = min(max(x, screen.minX + 4), screen.maxX - size.width - 4)
         // Top of the card level with the top of the row, kept on screen.
         var y = row.maxY - size.height
         y = min(max(y, screen.minY + 4), screen.maxY - size.height - 4)
         panel.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
-        if panel.parent !== window { panel.parent?.removeChildWindow(panel); window.addChildWindow(panel, ordered: .above) }
-        panel.orderFront(nil)
         panel.invalidateShadow()
     }
+}
+
+private struct HoverCardHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+private struct HoverCardViewport: View {
+    let content: AnyView
+    let maximumHeight: CGFloat
+    let resized: (CGFloat) -> Void
+    @State private var height: CGFloat = 300
+
+    var body: some View {
+        ScrollView {
+            content.frame(width: 300, alignment: .leading).padding(14)
+                .fixedSize(horizontal: false, vertical: true)
+                .background(GeometryReader { geometry in
+                    Color.clear.preference(key: HoverCardHeight.self, value: geometry.size.height)
+                })
+                .overlayScroller()
+        }
+        .frame(width: 328, height: min(height, maximumHeight))
+        .onPreferenceChange(HoverCardHeight.self) { value in
+            guard value > 0, abs(height - value) > 0.5 else { return }
+            height = value
+            resized(min(value, maximumHeight))
+        }
+    }
+}
+
+private final class InteractiveHoverHost: NSHostingView<AnyView> {
+    private var area: NSTrackingArea?
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area { removeTrackingArea(area) }
+        let area = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
+        addTrackingArea(area); self.area = area
+    }
+    override func mouseEntered(with event: NSEvent) { HoverCardController.shared.cardEntered() }
+    override func mouseExited(with event: NSEvent) { HoverCardController.shared.cardExited() }
 }
 
 /// Tracks the pointer over its frame and asks the controller for a card.
 private final class HoverAnchorView: NSView {
     var content: () -> AnyView = { AnyView(EmptyView()) }
+    var interactive = false
     private var area: NSTrackingArea?
 
     override func updateTrackingAreas() {
@@ -132,7 +197,7 @@ private final class HoverAnchorView: NSView {
         let a = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self)
         addTrackingArea(a); area = a
     }
-    override func mouseEntered(with event: NSEvent) { HoverCardController.shared.enter(self, content: content) }
+    override func mouseEntered(with event: NSEvent) { HoverCardController.shared.enter(self, interactive: interactive, content: content) }
     override func mouseExited(with event: NSEvent) { HoverCardController.shared.exit(self) }
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -148,27 +213,35 @@ private final class HoverAnchorView: NSView {
 private struct HoverAnchor: NSViewRepresentable {
     let box: HoverAnchorBox
     let content: () -> AnyView
-    func makeNSView(context: Context) -> HoverAnchorView { let v = HoverAnchorView(); v.content = content; box.view = v; return v }
-    func updateNSView(_ v: HoverAnchorView, context: Context) { v.content = content; box.view = v }
+    let interactive: Bool
+    func makeNSView(context: Context) -> HoverAnchorView { let v = HoverAnchorView(); v.content = content; v.interactive = interactive; box.view = v; return v }
+    func updateNSView(_ v: HoverAnchorView, context: Context) { v.content = content; v.interactive = interactive; box.view = v }
 }
 
 private struct HoverCardModifier<Card: View>: ViewModifier {
     let card: () -> Card
+    var interactive = false
+    var clickToOpen = false
     @State private var box = HoverAnchorBox()
     func body(content: Content) -> some View {
-        content
-            .background(HoverAnchor(box: box) { AnyView(card()) })
+        let anchored = content
+            .background(HoverAnchor(box: box, content: { AnyView(card()) }, interactive: interactive))
             // Keyboard and VoiceOver users get the same card through an action.
             .accessibilityAction(named: "Show Details") {
-                if let v = box.view { HoverCardController.shared.toggle(v) { AnyView(card()) } }
+                toggle()
             }
+        if clickToOpen { anchored.onTapGesture { toggle() } } else { anchored }
+    }
+    private func toggle() {
+        if let v = box.view { HoverCardController.shared.toggle(v, interactive: interactive) { AnyView(card()) } }
     }
 }
 
 extension View {
     /// Shows `card` beside the menu-bar panel while the pointer rests on this view.
-    @ViewBuilder func hoverCard<Card: View>(enabled: Bool = true, @ViewBuilder _ card: @escaping () -> Card) -> some View {
-        if enabled { modifier(HoverCardModifier(card: card)) } else { self }
+    @ViewBuilder func hoverCard<Card: View>(enabled: Bool = true, interactive: Bool = false, clickToOpen: Bool = false,
+                                          @ViewBuilder _ card: @escaping () -> Card) -> some View {
+        if enabled { modifier(HoverCardModifier(card: card, interactive: interactive, clickToOpen: clickToOpen)) } else { self }
     }
 }
 

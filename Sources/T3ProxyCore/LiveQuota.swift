@@ -35,7 +35,8 @@ public enum LiveQuotaTarget: CaseIterable, Sendable {
     }
     public var url: String {
         switch self {
-        case .claudeUsage: "https://api.anthropic.com/api/oauth/usage"
+        // Claude omits reset grants unless explicitly requested. Keep spend in this same reading.
+        case .claudeUsage: "https://api.anthropic.com/api/oauth/usage?cedar_ember=1"
         case .claudeProfile: "https://api.anthropic.com/api/oauth/profile"
         case .codexUsage: "https://chatgpt.com/backend-api/wham/usage"
         case .codexAccounts: "https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27"
@@ -46,7 +47,7 @@ public enum LiveQuotaTarget: CaseIterable, Sendable {
     public var method: String { self == .codexConsume ? "POST" : "GET" }
     func headers(accountID: String?) throws -> [String: String] {
         var h = ["Authorization": "Bearer $TOKEN$", "User-Agent": provider == .claude
-                 ? "claude-cli/2.1.280 (external, cli)" : "codex-tui/0.149.1"]
+                 ? "claude-cli/2.1.325 (external, cli)" : "codex-tui/0.149.1"]
         if provider == .claude { h["anthropic-beta"] = "oauth-2025-04-20" }
         if [.codexUsage, .codexCredits, .codexConsume].contains(self) {
             h["Content-Type"] = "application/json"; h["OpenAI-Beta"] = "codex-1"; h["Originator"] = "Codex Desktop"
@@ -63,14 +64,16 @@ public enum LiveQuotaTarget: CaseIterable, Sendable {
 
 extension ManagementClient {
     /// Reads one fixed target; consume is deliberately unavailable through this read API.
-    public func liveQuotaRead(_ target: LiveQuotaTarget, account: Account, key: String) async throws -> Data {
+    public func liveQuotaRead(_ target: LiveQuotaTarget, account: Account, key: String, allowDisabledCodex: Bool = false) async throws -> Data {
         guard target != .codexConsume else { throw LiveQuotaError.invalidCredit }
-        return try await quotaCall(target, account: account, confirmation: nil, key: key)
+        return try await quotaCall(target, account: account, confirmation: nil, key: key, allowDisabledCodex: allowDisabledCodex)
     }
 
     fileprivate func quotaCall(_ target: LiveQuotaTarget, account: Account,
-                               confirmation: ConfirmedResetCredit?, key: String) async throws -> Data {
-        guard !account.disabled, account.provider == target.provider,
+                               confirmation: ConfirmedResetCredit?, key: String, allowDisabledCodex: Bool = false) async throws -> Data {
+        let disabledReset = target == .codexConsume && confirmation?.routingDisabled == true
+        let disabledRead = allowDisabledCodex && [.codexUsage, .codexCredits].contains(target)
+        guard (!account.disabled || disabledReset || disabledRead), account.provider == target.provider,
               let index = account.authIndex, !index.isEmpty, index.utf8.count <= 256,
               !index.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             throw LiveQuotaError.invalidAccount
@@ -79,13 +82,17 @@ extension ManagementClient {
                                             "header": try target.headers(accountID: account.chatgptAccountID)]
         if target == .codexConsume {
             guard let confirmation, confirmation.accountIndex == index,
-                  confirmation.accountName == account.name, validCreditID(confirmation.creditID) else {
+                  confirmation.accountName == account.name, confirmation.routingDisabled == account.disabled, validCreditID(confirmation.creditID) else {
                 throw LiveQuotaError.invalidCredit
             }
             let payload = ["credit_id": confirmation.creditID, "redeem_request_id": confirmation.requestID.uuidString.lowercased()]
             body["data"] = String(decoding: try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]), as: UTF8.self)
         }
         let raw = try await send("POST", "v0/management/api-call", body, key: key)
+        return try quotaBody(raw)
+    }
+
+    fileprivate func quotaBody(_ raw: Data) throws -> Data {
         let envelope = try LiveQuotaParser.object(raw)
         guard let code = liveNumber(envelope["status_code"]), code.rounded() == code,
               (100...599).contains(code) else { throw LiveQuotaError.invalidResponse }
@@ -100,7 +107,7 @@ extension ManagementClient {
     }
 
     fileprivate func clearLiveQuotaCooldown(account: Account, key: String) async throws {
-        guard account.provider == .codex, !account.disabled, let index = account.authIndex, !index.isEmpty else {
+        guard [.codex, .claude].contains(account.provider), !account.disabled, let index = account.authIndex, !index.isEmpty else {
             throw LiveQuotaError.invalidAccount
         }
         try await send("POST", "v0/management/reset-quota", ["auth_index": index], key: key)
@@ -113,6 +120,10 @@ private func liveNumber(_ v: Any?) -> Double? {
         return finiteNumber(n.stringValue)
     }
     return (v as? String).flatMap(finiteNumber)
+}
+private func liveBool(_ v: Any?) -> Bool? {
+    guard let n = v as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }
+    return n.boolValue
 }
 private func livePercent(_ v: Any?) -> Double? { liveNumber(v).map { min(100, max(0, $0)) } }
 private func liveDate(_ v: Any?) -> Date? {
@@ -152,6 +163,8 @@ public enum LiveQuotaParser {
         q.source = .live
         switch provider {
         case .claude:
+            q.claudeResets = claudeResets(o["cedar_ember"])
+            q.availableResetCredits = q.claudeResets?.remaining(at: now)
             for (key, id, title) in [("five_hour", "five-hour", "5-hour session"), ("seven_day", "seven-day", "Weekly"),
                                       ("seven_day_opus", "seven-day-opus", "Weekly · Opus"),
                                       ("seven_day_sonnet", "seven-day-sonnet", "Weekly · Sonnet"),
@@ -248,6 +261,122 @@ public enum LiveQuotaParser {
     }
 }
 
+public enum ClaudeResetKind: String, Sendable, CaseIterable {
+    case fable, weekly, session, full, other
+    public var title: String {
+        switch self {
+        case .fable: "Fable reset"
+        case .weekly: "Weekly reset"
+        case .session: "5-hour reset"
+        case .full: "Full reset"
+        case .other: "Reset"
+        }
+    }
+}
+
+/// Claude grants stay separate from Codex credits and their redemption flow.
+public struct ClaudeResetGrant: Sendable, Equatable, Identifiable {
+    public let id: String
+    public let title: String
+    public let kind: ClaudeResetKind
+    public let resetsLeft: Int
+    public let startsAt: Date?
+    public let expiresAt: Date?
+    public let paused: Bool
+    public let usableNow: Bool
+    public let givesBackWeekly: Bool
+    public let clears: [String]
+
+    public func isUnexpired(at now: Date) -> Bool {
+        resetsLeft > 0 && expiresAt.map { $0 > now } != false && startsAt.map { $0 <= now } != false
+    }
+}
+
+public struct ClaudeResetStatus: Sendable, Equatable {
+    public let eligible: Bool
+    public let grants: [ClaudeResetGrant]
+    public let cooldownUntil: Date?
+    public func canUse(_ grant: ClaudeResetGrant, at now: Date) -> Bool {
+        eligible && cooldownUntil.map { $0 <= now } != false && grants.contains(grant)
+            && grant.isUnexpired(at: now) && !grant.paused && grant.usableNow
+    }
+    public func remaining(at now: Date) -> Int {
+        grants.filter { $0.isUnexpired(at: now) }.reduce(0) { $0 + $1.resetsLeft }
+    }
+}
+
+extension LiveQuotaParser {
+    /// Schema verified against Claude CLI 2.1.325 and live OAuth usage responses.
+    /// Missing or malformed grants are unknown, never an invented zero balance.
+    private static func claudeResets(_ value: Any?) -> ClaudeResetStatus? {
+        guard let status = value as? [String: Any], let eligible = liveBool(status["eligible"]),
+              let raw = status["grants"] as? [[String: Any]], raw.count <= 1000 else { return nil }
+        var seen = Set<String>(), grants: [ClaudeResetGrant] = []
+        for g in raw {
+            guard let id = g["id"] as? String, validCreditID(id), seen.insert(id).inserted,
+                  let n = liveNumber(g["resets_left"]), n >= 0, n <= 1_000_000, n.rounded() == n,
+                  let clears = g["clears"] as? [String], clears.count <= 64,
+                  clears.allSatisfy({ $0.range(of: #"^[a-z0-9_]{1,64}$"#, options: .regularExpression) != nil }) else { return nil }
+            let start = liveDate(g["starts_at"]), expiry = liveDate(g["ends_at"])
+            if let v = g["starts_at"], !(v is NSNull), start == nil { return nil }
+            if let v = g["ends_at"], !(v is NSNull), expiry == nil { return nil }
+            let givesBack = liveBool(g["gives_back_weekly"]) ?? false
+            let kind: ClaudeResetKind
+            // Claude's CLI classifies gives_back_weekly grants as Fable even when type is "full".
+            if givesBack { kind = .fable }
+            else if let type = g["type"] as? String {
+                kind = ClaudeResetKind(rawValue: type).flatMap { $0 == .fable ? nil : $0 } ?? .other
+            } else {
+                let session = clears.contains("five_hour"), weekly = clears.contains { $0 != "five_hour" }
+                kind = session && weekly ? .full : session ? .session : weekly ? .weekly : .other
+            }
+            let label = (g["label"] as? String).flatMap { $0.contains("@") ? nil : ManagementRules.cleanNickname($0, max: 160) }
+            grants.append(ClaudeResetGrant(id: id, title: label ?? kind.title, kind: kind, resetsLeft: Int(n),
+                                          startsAt: start, expiresAt: expiry, paused: liveBool(g["paused"]) ?? (g["paused"] != nil),
+                                          usableNow: liveBool(g["usable_now"]) ?? false, givesBackWeekly: givesBack, clears: clears))
+        }
+        let cooldown = liveDate(status["cooldown_until"])
+        if let value = status["cooldown_until"], !(value is NSNull), cooldown == nil { return nil }
+        // Claude's CLI selects the first usable grant of each kind in provider order.
+        return ClaudeResetStatus(eligible: eligible, grants: grants, cooldownUntil: cooldown)
+    }
+}
+
+/// Prepared by fresh reads of the same credential's grants and OAuth organization.
+public struct ClaudeResetConfirmation: Sendable, Equatable {
+    public let grant: ClaudeResetGrant
+    public let requestID: UUID
+    fileprivate let organization: UUID
+    fileprivate let accountIndex: String
+    fileprivate let accountName: String
+    fileprivate let keyEpoch: Int
+    public func confirm() -> ConfirmedClaudeReset { ConfirmedClaudeReset(value: self) }
+}
+
+public struct ConfirmedClaudeReset: Sendable {
+    fileprivate let value: ClaudeResetConfirmation
+    public var requestID: UUID { value.requestID }
+}
+
+public enum ClaudeResetResult: String, Sendable {
+    case reset, alreadyUsed = "already_used", notLimited = "not_limited", cooldown, ineligible, unavailable, unconfirmed
+}
+
+extension ManagementClient {
+    fileprivate func claimClaudeReset(account: Account, confirmed: ConfirmedClaudeReset, key: String) async throws -> Data {
+        let c = confirmed.value
+        guard account.provider == .claude, !account.disabled, account.authIndex == c.accountIndex,
+              account.name == c.accountName else { throw LiveQuotaError.invalidCredit }
+        let url = "https://api.anthropic.com/api/organizations/\(c.organization.uuidString.lowercased())/reset_rate_limits"
+        var headers = try LiveQuotaTarget.claudeUsage.headers(accountID: nil)
+        headers["Content-Type"] = "application/json"
+        let payload = ["program": "cedar_ember", "grant_id": c.grant.id, "request_id": c.requestID.uuidString.lowercased()]
+        let body: [String: any Sendable] = ["authIndex": c.accountIndex, "method": "POST", "url": url, "header": headers,
+            "data": String(decoding: try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]), as: UTF8.self)]
+        return try quotaBody(await send("POST", "v0/management/api-call", body, key: key))
+    }
+}
+
 private func validCreditID(_ id: String) -> Bool {
     id.range(of: #"^[A-Za-z0-9_-]{1,100}$"#, options: .regularExpression) != nil
 }
@@ -288,26 +417,36 @@ extension LiveQuotaParser {
 @MainActor public final class ResetCreditConfirmationStore {
     private var requests: [String: [String: UUID]] = [:]
     public init() {}
-    public func prepare(credit: ResetCredit, account: Account) throws -> ResetCreditConfirmation {
-        guard !account.disabled, account.provider == .codex, let index = account.authIndex, !index.isEmpty,
+    public func prepare(credit: ResetCredit, account: Account, allowDisabled: Bool = false) throws -> ResetCreditConfirmation {
+        guard (!account.disabled || allowDisabled), account.provider == .codex, let index = account.authIndex, !index.isEmpty,
               validCreditID(credit.id) else { throw LiveQuotaError.invalidCredit }
         let scope = index + "\u{0}" + account.name
         let request = requests[scope]?[credit.id] ?? UUID()
         requests[scope, default: [:]][credit.id] = request
-        return ResetCreditConfirmation(accountIndex: index, accountName: account.name, creditID: credit.id, requestID: request)
+        return ResetCreditConfirmation(routingDisabled: account.disabled, accountIndex: index, accountName: account.name, creditID: credit.id, requestID: request)
     }
 }
 public struct ResetCreditConfirmation: Sendable {
+    fileprivate let routingDisabled: Bool
     fileprivate let accountIndex: String
     fileprivate let accountName: String
     fileprivate let creditID: String
     public let requestID: UUID
     /// Invoke only after the user's deliberate confirmation. Refresh never calls this.
     public func confirm() -> ConfirmedResetCredit {
-        ConfirmedResetCredit(accountIndex: accountIndex, accountName: accountName, creditID: creditID, requestID: requestID)
+        ConfirmedResetCredit(routingDisabled: routingDisabled, accountIndex: accountIndex, accountName: accountName, creditID: creditID, requestID: requestID)
     }
 }
 public struct ConfirmedResetCredit: Sendable {
+    /// Present a fresh deliberate confirmation after routing changes, keeping the uncertain request pinned.
+    public func prepareRetry(account: Account) throws -> ResetCreditConfirmation {
+        guard account.provider == .codex, account.authIndex == accountIndex, account.name == accountName else {
+            throw LiveQuotaError.invalidCredit
+        }
+        return ResetCreditConfirmation(routingDisabled: account.disabled, accountIndex: accountIndex,
+                                       accountName: accountName, creditID: creditID, requestID: requestID)
+    }
+    fileprivate let routingDisabled: Bool
     fileprivate let accountIndex: String
     fileprivate let accountName: String
     fileprivate let creditID: String
@@ -357,13 +496,13 @@ public enum ResetCreditResult: Sendable, Equatable {
         await acquire(); defer { release() }
         try Task.checkCancellation()
         if target == .claudeUsage || target == .codexUsage { lastRead[identity(account)] = clock() }
-        return try await monitor.management { try await $0.liveQuotaRead(target, account: account, key: $1) }
+        return try await monitor.management { try await $0.liveQuotaRead(target, account: account, key: $1, allowDisabledCodex: account.provider == .codex) }
     }
 
     /// Map keyed by Account.id; failed reads retain the last good live reading (or are omitted).
-    public func refresh(_ accounts: [Account]) async -> [String: QuotaReading] {
+    public func refresh(_ accounts: [Account], includeDisabledCodex: Bool = false) async -> [String: QuotaReading] {
         await withTaskGroup(of: (String, QuotaReading?).self) { group in
-            for a in accounts where !a.disabled && a.provider != .other && a.authIndex?.isEmpty == false {
+            for a in accounts where (!a.disabled || includeDisabledCodex && a.provider == .codex) && a.provider != .other && a.authIndex?.isEmpty == false {
                 group.addTask { (a.id, await self.refreshAccount(a)) }
             }
             var result: [String: QuotaReading] = [:]
@@ -419,14 +558,57 @@ public enum ResetCreditResult: Sendable, Equatable {
     }
 
     public func resetCredits(_ account: Account) async throws -> [ResetCredit] {
-        guard account.provider == .codex, !account.disabled else { throw LiveQuotaError.invalidAccount }
+        guard account.provider == .codex else { throw LiveQuotaError.invalidAccount }
         return try LiveQuotaParser.resetCredits(await read(.codexCredits, account: account), now: clock())
+    }
+
+    /// Reads only. A confirmation is bound to this account, organization, grant and management-key epoch.
+    public func prepareClaudeReset(account: Account, grantID: String) async throws -> ClaudeResetConfirmation {
+        guard account.provider == .claude, !account.disabled, let index = account.authIndex, !index.isEmpty else {
+            throw LiveQuotaError.invalidAccount
+        }
+        guard grantID.range(of: #"^[a-z0-9_-]{1,40}$"#, options: .regularExpression) != nil else { throw LiveQuotaError.invalidCredit }
+        let keyEpoch = monitor.keyEpoch
+        let usage = try await read(.claudeUsage, account: account)
+        let profile = try await read(.claudeProfile, account: account)
+        let now = clock()
+        guard monitor.keyEpoch == keyEpoch else { throw CancellationError() }
+        guard let status = try LiveQuotaParser.usage(usage, provider: .claude, now: now).claudeResets,
+              let grant = status.grants.first(where: { $0.id == grantID }), status.canUse(grant, at: now),
+              let org = try LiveQuotaParser.object(profile)["organization"] as? [String: Any],
+              let id = org["uuid"] as? String, let uuid = UUID(uuidString: id) else { throw LiveQuotaError.invalidCredit }
+        return ClaudeResetConfirmation(grant: grant, requestID: UUID(), organization: uuid,
+                                       accountIndex: index, accountName: account.name, keyEpoch: keyEpoch)
+    }
+
+    /// Never retried automatically. Keep `confirmed` when the response is uncertain.
+    public func consumeClaudeReset(account: Account, confirmed: ConfirmedClaudeReset,
+                                   revalidate: @MainActor @Sendable () -> Bool = { true }) async throws -> ClaudeResetResult {
+        let c = confirmed.value
+        guard account.provider == .claude, !account.disabled, account.authIndex == c.accountIndex,
+              account.name == c.accountName else { throw LiveQuotaError.invalidCredit }
+        await acquire(); defer { release() }
+        try Task.checkCancellation()
+        guard monitor.keyEpoch == c.keyEpoch, revalidate() else { throw CancellationError() }
+        let data = try await monitor.management { try await $0.claimClaudeReset(account: account, confirmed: confirmed, key: $1) }
+        let body = try LiveQuotaParser.object(data)
+        let result: ClaudeResetResult
+        if ["stamp_indeterminate", "reset_unconfirmed"].contains(body["reason"] as? String ?? "") {
+            result = .unconfirmed
+        } else { result = (body["result"] as? String).flatMap(ClaudeResetResult.init(rawValue:)) ?? .unconfirmed }
+        if result == .reset || result == .alreadyUsed {
+            await afterSuccess(account)
+        } else if result != .unconfirmed {
+            let id = identity(account)
+            generations[id, default: 0] += 1; cache[id] = nil; lastRead[id] = nil
+        }
+        return result
     }
 
     /// No automatic retry. The caller retains the confirmed value to retry the same request.
     public func consume(account: Account, confirmed credit: ConfirmedResetCredit,
                         revalidate: @MainActor @Sendable () -> Bool = { true }) async throws -> ResetCreditResult {
-        guard account.provider == .codex, !account.disabled else { throw LiveQuotaError.invalidAccount }
+        guard account.provider == .codex, account.disabled == credit.routingDisabled else { throw LiveQuotaError.invalidAccount }
         let keyEpoch = monitor.keyEpoch
         await acquire(); defer { release() }
         try Task.checkCancellation()
@@ -454,6 +636,8 @@ public enum ResetCreditResult: Sendable, Equatable {
         let id = identity(account)
         generations[id, default: 0] += 1
         cache[id] = nil; lastRead[id] = nil
+        // A reset of a paused subscription must not change its routing or local cooldown state.
+        guard !account.disabled else { cooldownClearFailed.remove(account.id); return }
         do {
             try await monitor.management { try await $0.clearLiveQuotaCooldown(account: account, key: $1) }
             cooldownClearFailed.remove(account.id)

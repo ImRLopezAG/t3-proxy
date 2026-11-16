@@ -1,24 +1,14 @@
 import SwiftUI
-import AppKit
 import T3ProxyCore
 
-/// "About Proxy": Proxy Deck's SystemPage and a key-free Quick Start.
 struct SystemPane: View {
     @ObservedObject var monitor: Monitor
     @State private var info: HubVersionInfo?
     @State private var error: String?
     @State private var loading = false
-    @State private var copied: String?
     @StateObject private var updater = HubUpdateModel()
     @State private var confirmUpdate = false
     @State private var showUpdate = false
-    @State private var usageIssue: String?
-
-    private static let keyPlaceholder = "<your client key>"
-    private var base: String { monitor.endpoint.base.absoluteString }
-    private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development build"
-    }
 
     var body: some View {
         Form {
@@ -42,32 +32,10 @@ struct SystemPane: View {
                 Text("Updates use your Homebrew installation.").font(.footnote).foregroundStyle(.secondary)
                 if let message = updater.result, updater.installation == nil { Text(message).font(.footnote) }
             }
-            Section("T3 Proxy") {
-                LabeledContent("Version") { Text(appVersion) }
-                if let usageIssue { LabeledContent("Usage history", value: usageIssue) }
-            }
-            Section {
-                snippet("Claude Code", "export ANTHROPIC_BASE_URL='\(base)'\nexport ANTHROPIC_AUTH_TOKEN='\(Self.keyPlaceholder)'\nclaude")
-                snippet("Codex (~/.codex/config.toml)", """
-                    model_provider = "cliproxyapi"
 
-                    [model_providers.cliproxyapi]
-                    name = "CLIProxyAPI"
-                    base_url = "\(base)/v1"
-                    wire_api = "responses"
-                    env_key = "CLIPROXYAPI_KEY"
-                    """)
-                snippet("Codex (shell)", "export CLIPROXYAPI_KEY='\(Self.keyPlaceholder)'\ncodex")
-                snippet("OpenAI-compatible", "export OPENAI_BASE_URL='\(base)/v1'\nexport OPENAI_API_KEY='\(Self.keyPlaceholder)'")
-            } header: {
-                Text("Quick Start")
-            } footer: {
-                Text("Replace \(Self.keyPlaceholder) with one of the hub's client API keys (not the management key). T3 Proxy never shows or copies keys.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
         }
         .formStyle(.grouped)
-        .navigationTitle("About Proxy")
+        .navigationTitle("Updates")
         .toolbar {
             ToolbarItem {
                 Button { Task { await load() } } label: { Label("Check Again", systemImage: "arrow.clockwise") }
@@ -78,12 +46,7 @@ struct SystemPane: View {
             await load()
             // Monitor's management path has already resolved the per-launch Keychain cache.
             await updater.inspect(managementKey: KeychainKeyStore().load())
-            let source = UsageModel.shared.source
-            usageIssue = await Task.detached(priority: .utility) { () -> String? in
-                do { _ = try source.daily(days: 1, now: Date(), calendar: .current); return Optional<String>.none }
-                catch UsageError.unreadable(let message) where message == "usage database too large" { return message }
-                catch { return nil }
-            }.value
+
         }
         .confirmationDialog("Update the hub and restart its service?", isPresented: $confirmUpdate) {
             Button("Update and Restart", role: .destructive) {
@@ -115,23 +78,6 @@ struct SystemPane: View {
         case .failed(let m): Label(m, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
         case .noKey: Text(monitor.hasKey ? "Not checked yet" : "Not set").foregroundStyle(.secondary)
         }
-    }
-
-    private func snippet(_ title: String, _ text: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(title).font(.headline)
-                Spacer()
-                Button(copied == title ? "Copied" : "Copy") {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(text, forType: .string)
-                    copied = title
-                }
-            }
-            Text(text).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(.vertical, 2)
     }
 
     private func load() async {

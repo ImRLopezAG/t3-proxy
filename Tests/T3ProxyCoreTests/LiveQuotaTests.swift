@@ -3,6 +3,45 @@ import Testing
 @testable import T3ProxyCore
 
 @Suite struct LiveQuotaParserTests {
+    @Test func claudeResetGrantsAreReadFromUsage() throws {
+        let q = try LiveQuotaParser.usage(Data(#"{"cedar_ember":{"eligible":true,"grants":[{"id":"weekly","label":"Weekly reset","type":"weekly","resets_left":1,"clears":["seven_day"],"ends_at":"2026-12-10T22:00:00Z"},{"id":"model","label":"Fable reset","type":"full","resets_left":2,"clears":["seven_day_overage_included"],"gives_back_weekly":true,"ends_at":"2027-03-09T07:59:00Z","usable_now":true}]}}"#.utf8), provider: .claude, now: lqNow)
+        #expect(q.availableResetCredits == 3)
+        let status = try #require(q.claudeResets)
+        #expect(status.grants.map(\.kind) == [.weekly, .fable])
+        #expect(status.grants[1].resetsLeft == 2 && status.grants[1].usableNow)
+        #expect(status.grants[1].givesBackWeekly && status.grants[1].clears == ["seven_day_overage_included"])
+        #expect(status.grants[0].expiresAt == parseHubDate("2026-12-10T22:00:00Z"))
+        #expect(status.grants[1].expiresAt == parseHubDate("2027-03-09T07:59:00Z"))
+        #expect(status.remaining(at: try #require(parseHubDate("2026-12-10T22:00:00Z"))) == 2)
+        #expect(status.remaining(at: try #require(parseHubDate("2027-03-09T07:59:00Z"))) == 0)
+    }
+
+    @Test(arguments: ["null", "{}", #"{"eligible":true}"#, #"{"eligible":true,"grants":[null]}"#,
+                      #"{"eligible":true,"grants":[{"id":"bad","resets_left":true,"clears":[]}]}"#,
+                      #"{"eligible":true,"grants":[{"id":"bad","resets_left":1.5,"clears":[]}]}"#,
+                      #"{"eligible":true,"grants":[{"id":"bad","resets_left":1,"clears":[],"ends_at":"broken"}]}"#,
+                      #"{"eligible":1,"grants":[]}"#])
+    func claudeUnavailableResetGrantsStayUnknown(_ block: String) throws {
+        let q = try LiveQuotaParser.usage(Data("{\"five_hour\":{\"utilization\":25},\"cedar_ember\":\(block)}".utf8), provider: .claude, now: lqNow)
+        #expect(q.claudeResets == nil && q.availableResetCredits == nil)
+        #expect(q.window(.session)?.usedPercent == 25)
+    }
+
+    @Test func claudeResetZeroAndHeldGrantsAreDistinct() throws {
+        let empty = try LiveQuotaParser.usage(json(#"{"cedar_ember":{"eligible":false,"grants":[]}}"#), provider: .claude, now: lqNow)
+        #expect(empty.availableResetCredits == 0 && empty.claudeResets?.eligible == false)
+        let q = try LiveQuotaParser.usage(json(#"{"cedar_ember":{"eligible":true,"grants":[{"id":"paused","label":"user@example.test","resets_left":1,"clears":["five_hour"],"paused":true},{"id":"future","resets_left":2,"clears":["five_hour","seven_day"],"starts_at":"2099-01-01T00:00:00Z"},{"id":"spent","resets_left":0,"clears":[]}]}}"#), provider: .claude, now: lqNow)
+        #expect(q.availableResetCredits == 1)
+        let held = try #require(q.claudeResets?.grants.first { $0.id == "paused" })
+        #expect(held.paused && !held.usableNow && held.kind == .session)
+        #expect(held.title == "5-hour reset")
+        #expect(q.claudeResets?.grants.first { $0.id == "future" }?.kind == .full)
+    }
+
+    @Test func claudeUsageRequestsResetDetailsWithoutDroppingSpend() {
+        #expect(LiveQuotaTarget.claudeUsage.url == "https://api.anthropic.com/api/oauth/usage?cedar_ember=1")
+    }
+
     @Test func claudeScopedLimitsAndSafety() throws {
         let data = Data(#"{"five_hour":{"utilization":140},"seven_day":{"utilization":"NaN"},"limits":[{"kind":"weekly_scoped","scope":{"model":{"display_name":"Fable"}},"percent":42,"resets_at":"2026-11-08T00:00:00Z"}]}"#.utf8)
         let q = try LiveQuotaParser.usage(data, provider: .claude)
@@ -171,6 +210,129 @@ private func envelope(_ body: String, status: Int = 200) -> String {
 }
 
 @Suite(.serialized) @MainActor struct LiveQuotaRequestTests {
+    private var claudeUsage: String {
+        #"{"cedar_ember":{"eligible":true,"grants":[{"id":"weekly_1","type":"weekly","resets_left":1,"clears":["seven_day"],"usable_now":true,"paused":false,"ends_at":"2026-12-10T22:00:00Z"}]}}"#
+    }
+    private var claudeProfile: String {
+        #"{"organization":{"uuid":"12345678-1234-1234-1234-123456789abc"}}"#
+    }
+
+    @Test func claudeClaimUsesOwnOrganizationAndStableRequest() async throws {
+        let usage = claudeUsage, profile = claudeProfile
+        let m = lqMonitor { r in
+            if r.url?.path == "/v0/management/reset-quota" { return (200, "{}") }
+            let b = requestBody(r), url = b["url"] as? String ?? ""
+            return (200, envelope(url.contains("profile") ? profile : url.contains("reset_rate_limits") ? #"{"result":"reset","cleared":["seven_day"]}"# : usage))
+        }
+        let a = lqAccount(.claude), service = LiveQuotaService(monitor: m, clock: { lqNow })
+        let prepared = try await service.prepareClaudeReset(account: a, grantID: "weekly_1")
+        #expect(prepared.grant.kind == .weekly)
+        #expect(!LQStub.seen.contains { requestBody($0)["method"] as? String == "POST" })
+        let confirmed = prepared.confirm()
+        #expect(try await service.consumeClaudeReset(account: a, confirmed: confirmed) == .reset)
+        #expect(try await service.consumeClaudeReset(account: a, confirmed: confirmed) == .reset)
+        let claims = LQStub.seen.map(requestBody).filter { $0["method"] as? String == "POST" }
+        #expect(claims.count == 2)
+        for claim in claims {
+            #expect(claim["authIndex"] as? String == a.authIndex)
+            #expect(claim["url"] as? String == "https://api.anthropic.com/api/organizations/12345678-1234-1234-1234-123456789abc/reset_rate_limits")
+            let headers = try #require(claim["header"] as? [String: String])
+            #expect(headers["Authorization"] == "Bearer $TOKEN$" && headers["Content-Type"] == "application/json")
+            let payload = try #require(claim["data"] as? String)
+            let body = try #require(JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: String])
+            #expect(body == ["program": "cedar_ember", "grant_id": "weekly_1", "request_id": confirmed.requestID.uuidString.lowercased()])
+        }
+        #expect(claims.first?["data"] as? String == claims.last?["data"] as? String)
+    }
+
+    @Test(arguments: ["paused", "unusable", "expired", "ineligible", "bad_flag", "bad_org", "cooldown", "unknown_grant"])
+    func claudeUnavailableGrantCannotBePrepared(_ reason: String) async throws {
+        var usage = claudeUsage, profile = claudeProfile
+        switch reason {
+        case "paused": usage = usage.replacingOccurrences(of: #""paused":false"#, with: #""paused":true"#)
+        case "unusable": usage = usage.replacingOccurrences(of: #""usable_now":true"#, with: #""usable_now":false"#)
+        case "expired": usage = usage.replacingOccurrences(of: "2026-12-10", with: "2020-12-10")
+        case "ineligible": usage = usage.replacingOccurrences(of: #""eligible":true"#, with: #""eligible":false"#)
+        case "bad_flag": usage = usage.replacingOccurrences(of: #""usable_now":true"#, with: #""usable_now":1"#)
+        case "bad_org": profile = profile.replacingOccurrences(of: "12345678-1234-1234-1234-123456789abc", with: "../elsewhere")
+        case "cooldown": usage = usage.replacingOccurrences(of: #""eligible":true"#, with: #""eligible":true,"cooldown_until":"2099-01-01T00:00:00Z""#)
+        default: break
+        }
+        let u = usage, p = profile
+        let m = lqMonitor { r in (200, envelope((requestBody(r)["url"] as? String)?.contains("profile") == true ? p : u)) }
+        let service = LiveQuotaService(monitor: m, clock: { lqNow })
+        await #expect(throws: LiveQuotaError.invalidCredit) {
+            try await service.prepareClaudeReset(account: lqAccount(.claude), grantID: reason == "unknown_grant" ? "other" : "weekly_1")
+        }
+        #expect(!LQStub.seen.contains { requestBody($0)["method"] as? String == "POST" })
+    }
+
+    @Test(arguments: ["reset", "already_used", "not_limited", "cooldown", "ineligible", "unavailable", "unknown", "stamp_indeterminate"])
+    func claudeResultHandling(_ code: String) async throws {
+        let u = claudeUsage, p = claudeProfile
+        let m = lqMonitor { r in
+            if r.url?.path == "/v0/management/reset-quota" { return (200, "{}") }
+            let url = requestBody(r)["url"] as? String ?? ""
+            let result = code == "stamp_indeterminate" ? #"{"result":"unavailable","reason":"stamp_indeterminate"}"# : "{\"result\":\"\(code)\"}"
+            return (200, envelope(url.contains("profile") ? p : url.contains("reset_rate_limits") ? result : u))
+        }
+        let a = lqAccount(.claude), service = LiveQuotaService(monitor: m, clock: { lqNow })
+        let c = try await service.prepareClaudeReset(account: a, grantID: "weekly_1").confirm()
+        let result = try await service.consumeClaudeReset(account: a, confirmed: c)
+        #expect(result == (["unknown", "stamp_indeterminate"].contains(code) ? .unconfirmed : ClaudeResetResult(rawValue: code)!))
+        let count = LQStub.seen.count
+        await #expect(throws: LiveQuotaError.invalidCredit) { try await service.consumeClaudeReset(account: lqAccount(.claude, index: "different"), confirmed: c) }
+        await #expect(throws: CancellationError.self) { try await service.consumeClaudeReset(account: a, confirmed: c, revalidate: { false }) }
+        #expect(LQStub.seen.count == count)
+    }
+
+    @Test(arguments: [true, false])
+    func queuedClaudeClaimRevalidatesBeforeSending(changeKey: Bool) async throws {
+        let u = claudeUsage, p = claudeProfile
+        let m = lqMonitor { r in (200, envelope((requestBody(r)["url"] as? String)?.contains("profile") == true ? p : u)) }
+        let a = lqAccount(.claude), service = LiveQuotaService(monitor: m, clock: { lqNow })
+        let c = try await service.prepareClaudeReset(account: a, grantID: "weekly_1").confirm()
+        let held = LQHeldRequests()
+        LQStub.holdNext(2) { held.append($0) }
+        let first = Task { try? await service.resetCredits(lqAccount(index: "first")) }
+        let second = Task { try? await service.resetCredits(lqAccount(index: "second")) }
+        await held.waitForTwo()
+        var valid = true
+        var claim: Task<Void, Never>?
+        await withCheckedContinuation { (started: CheckedContinuation<Void, Never>) in
+            claim = Task { @MainActor in
+                started.resume()
+                await #expect(throws: CancellationError.self) {
+                    try await service.consumeClaudeReset(account: a, confirmed: c, revalidate: { valid })
+                }
+            }
+        }
+        if changeKey { _ = await m.setKey("replacement-management-key") } else { valid = false }
+        let count = LQStub.seen.count
+        held.release()
+        _ = await first.value; _ = await second.value; await claim?.value
+        #expect(LQStub.seen.count == count)
+        #expect(!LQStub.seen.contains { requestBody($0)["method"] as? String == "POST" })
+    }
+
+    @Test func claudeDefinitiveClaimInvalidatesThrottledUsage() async throws {
+        let u = claudeUsage, p = claudeProfile
+        let m = lqMonitor { r in
+            if r.url?.path == "/v0/management/reset-quota" { return (200, "{}") }
+            let url = requestBody(r)["url"] as? String ?? ""
+            return (200, envelope(url.contains("profile") ? p : url.contains("reset_rate_limits") ? #"{"result":"reset"}"# : u))
+        }
+        let a = lqAccount(.claude), service = LiveQuotaService(monitor: m, clock: { lqNow })
+        _ = await service.refresh([a])
+        let c = try await service.prepareClaudeReset(account: a, grantID: "weekly_1").confirm()
+        #expect(try await service.consumeClaudeReset(account: a, confirmed: c) == .reset)
+        let before = LQStub.seen.count
+        let refreshed = await service.refresh([a])
+        #expect(refreshed[a.id]?.claudeResets?.remaining(at: lqNow) == 1)
+        #expect(LQStub.seen.count == before + 1)
+        #expect(requestBody(try #require(LQStub.seen.last))["url"] as? String == LiveQuotaTarget.claudeUsage.url)
+    }
+
     @Test func fixedTargetsAndRequestShape() async throws {
         let m = lqMonitor { _ in (200, envelope("{}")) }
         #expect(LiveQuotaTarget.allCases.count == 6)
@@ -309,6 +471,23 @@ private func envelope(_ body: String, status: Int = 200) -> String {
 }
 
 extension LiveQuotaRequestTests {
+    @Test func serviceReadsClaudeGrantsAndSpendTogetherWithoutConsuming() async throws {
+        let m = lqMonitor { r in
+            let body = requestBody(r)
+            let url = body["url"] as? String ?? ""
+            if url.contains("profile") { return (200, envelope("{}")) }
+            #expect(url == "https://api.anthropic.com/api/oauth/usage?cedar_ember=1")
+            #expect(body["method"] as? String == "GET" && body["data"] == nil)
+            return (200, envelope(#"{"five_hour":{"utilization":25},"extra_usage":{"is_enabled":true,"used_credits":123},"cedar_ember":{"eligible":true,"grants":[{"id":"model","type":"full","resets_left":2,"gives_back_weekly":true,"clears":["seven_day_overage_included"],"ends_at":"2027-03-09T07:59:00Z"}]}}"#))
+        }
+        let a = lqAccount(.claude), service = LiveQuotaService(monitor: m, clock: { lqNow })
+        let readings = await service.refresh([a])
+        let q = try #require(readings[a.id])
+        #expect(q.claudeResets?.grants.first?.kind == .fable && q.availableResetCredits == 2)
+        #expect(q.credits?.balance == 123 && q.window(.session)?.usedPercent == 25)
+        #expect(LQStub.seen.count == 2)
+    }
+
     @Test func atMostTwoHubCallsWhileOthersAreQueued() async {
         let m = lqMonitor { _ in (200, envelope("{}")) }, held = LQHeldRequests()
         LQStub.holdNext(2) { held.append($0) }
@@ -372,5 +551,56 @@ extension LiveQuotaRequestTests {
         await #expect(throws: LiveQuotaError.invalidResponse) { try await m.management { try await $0.liveQuotaRead(.codexUsage, account: lqAccount(), key: $1) } }
         let large = lqMonitor { _ in (200, envelope(String(repeating: "x", count: LiveQuotaParser.maximumResponseBytes + 1))) }
         await #expect(throws: LiveQuotaError.responseTooLarge) { try await large.management { try await $0.liveQuotaRead(.codexUsage, account: lqAccount(), key: $1) } }
+    }
+}
+
+extension LiveQuotaRequestTests {
+    @Test func pausedCodexResetIsExplicitAndDoesNotEnableRouting() async throws {
+        var paused = lqAccount(); paused.disabled = true
+        paused.quota = QuotaReading(observedAt: lqNow, windows: [
+            .init(id: "session", label: "5-hour", usedPercent: 32, resetAt: lqNow + 2500),
+            .init(id: "weekly", label: "Weekly", usedPercent: 100, resetAt: lqNow + 4 * 86400)], models: [:], plan: nil)
+        let monitor = lqMonitor { req in
+            let body = requestBody(req)
+            let url = body["url"] as? String ?? ""
+            if url.hasSuffix("/consume") { return (200, envelope(#"{"code":"reset","windows_reset":2}"#)) }
+            if url.hasSuffix("reset-credits") { return (200, envelope(#"{"credits":[{"id":"credit_1","status":"available"}]}"#)) }
+            if url.hasSuffix("/usage") { return (200, envelope(#"{"rate_limit":{"primary_window":{"used_percent":32,"limit_window_seconds":18000},"secondary_window":{"used_percent":100,"limit_window_seconds":604800}},"rate_limit_reset_credits":{"available_count":1}}"#)) }
+            return (200, envelope("{}"))
+        }
+        let service = LiveQuotaService(monitor: monitor, clock: { lqNow })
+        #expect(await service.refresh([paused]).isEmpty)
+        let readings = await service.refresh([paused], includeDisabledCodex: true)
+        #expect(readings[paused.id]?.remaining(.weekly, at: lqNow) == 0)
+        let credit = try #require(try await service.resetCredits(paused).first)
+        let store = ResetCreditConfirmationStore()
+        #expect(throws: LiveQuotaError.invalidCredit) { try store.prepare(credit: credit, account: paused) }
+        let confirmed = try store.prepare(credit: credit, account: paused, allowDisabled: true).confirm()
+        #expect(try await service.consume(account: paused, confirmed: confirmed) == .reset(windows: 2))
+        var enabled = paused; enabled.disabled = false
+        await #expect(throws: LiveQuotaError.invalidAccount) { try await service.consume(account: enabled, confirmed: confirmed) }
+        #expect(paused.disabled)
+        #expect(!LQStub.seen.contains { $0.url?.path.contains("auth-files") == true || $0.url?.path.contains("reset-quota") == true })
+    }
+}
+
+extension LiveQuotaRequestTests {
+    @Test func uncertainResetCanReconfirmRoutingWithoutChangingRequest() async throws {
+        let account = lqAccount()
+        let credit = try listedCredit()
+        let original = try ResetCreditConfirmationStore().prepare(credit: credit, account: account).confirm()
+        var paused = account; paused.disabled = true
+        let retry = try original.prepareRetry(account: paused).confirm()
+        #expect(retry.requestID == original.requestID)
+        let monitor = lqMonitor { req in
+            let body = requestBody(req)
+            #expect((body["data"] as? String)?.contains(original.requestID.uuidString.lowercased()) == true)
+            return (200, envelope(#"{"code":"already_redeemed"}"#))
+        }
+        let service = LiveQuotaService(monitor: monitor)
+        #expect(try await service.consume(account: paused, confirmed: retry) == .alreadyRedeemed)
+        var different = paused; different.authIndex = "another-credential"
+        #expect(throws: LiveQuotaError.invalidCredit) { try original.prepareRetry(account: different) }
+        #expect(!LQStub.seen.contains { $0.url?.path.contains("auth-files") == true || $0.url?.path.contains("reset-quota") == true })
     }
 }

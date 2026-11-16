@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 import T3ProxyCore
 
-/// T3 Code threads: NEEDS YOU / RUNNING / FINISHED in the same glass card style as Accounts.
+/// T3 Code threads: NEEDS YOU / RUNNING / SNOOZED / FINISHED in the same glass card style as Accounts.
 struct ThreadsTab: View {
     let c: PanelContent
     let openSettings: () -> Void
@@ -22,7 +22,7 @@ struct ThreadsTab: View {
             HStack { SectionTitle(text: "Threads"); Spacer(); if model.status.isConnected { Pill(text: "\(count)") } }.padding(.vertical, 8)
             switch model.status {
             case .connected:
-                if sections.isEmpty { Note(text: "No threads need you, are running, or finished in the last 24 hours.").padding(.bottom, 8) }
+                if sections.isEmpty { Note(text: "No threads need you, are running, snoozed, or recently finished.").padding(.bottom, 8) }
                 else { list(sections, now: now) }
             case .notRunning:
                 unavailable("T3 Code isn't running", symbol: "moon.zzz", button: "Open T3 Code") { T3CodeModel.open(threadID: nil) }
@@ -207,7 +207,7 @@ struct ThreadRowView: View {
             Text(shortAge(at ?? row.thread.updatedAt))
                 .font(.system(size: 10.5)).monospacedDigit().foregroundStyle(row.status == .failed(at: at) ? Color.red : Color.secondary)
                 .lineLimit(1).fixedSize()
-        case .needsYou, .limit:
+        case .needsYou, .limit, .snoozed:
             status
         }
     }
@@ -293,7 +293,7 @@ struct ThreadRowView: View {
         case .running: .green
         case .failed: .red
         case .waiting: .blue.opacity(0.7)
-        case .limit, .done: .secondary
+        case .limit, .done, .snoozed: .secondary
         }
     }
 

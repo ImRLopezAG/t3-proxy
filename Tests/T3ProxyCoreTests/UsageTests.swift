@@ -299,6 +299,40 @@ private final class UsageTestClock: @unchecked Sendable {
     #expect(try usageDirectoryStamps(path) == before)
 }
 
+@Test func usageRecoversDeletedSnapshotWithoutTouchingHistory() throws {
+    let now = Date()
+    let path = makeDB([(Int64(now.timeIntervalSince1970 * 1000), "codex", "m", "a", 42, 0)])
+    defer { try? FileManager.default.removeItem(atPath: (path as NSString).deletingLastPathComponent) }
+    let source = SQLiteUsageSource(path: path)
+    #expect(try source.daily(days: 1, now: now)[0].totals.total == 42)
+    let before = try usageDirectoryStamps(path)
+    let cached = try UsageSnapshots.shared.snapshot(path: path)
+    try FileManager.default.removeItem(at: cached.directory)
+    // Same source stamps and within the reuse window: the missing copy must still be rebuilt.
+    #expect(try source.daily(days: 1, now: now)[0].totals.total == 42)
+    let p = TokenRange.today.plan(now: now)
+    #expect(try source.series(start: p.start, width: p.width, count: p.count).totals.total == 42)
+    #expect(try usageDirectoryStamps(path) == before)
+}
+
+@Test func usageCacheStartupPreservesAnotherReadersSnapshot() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("snapshot-tests-\(UUID().uuidString)")
+    try fm.createDirectory(at: root, withIntermediateDirectories: false)
+    defer { try? fm.removeItem(at: root) }
+    let path = makeDB([])
+    defer { try? fm.removeItem(atPath: (path as NSString).deletingLastPathComponent) }
+    let first = UsageSnapshots(root: root)
+    let snapshot = try first.snapshot(path: path)
+    let before = try Data(contentsOf: snapshot.file)
+    let second = UsageSnapshots(root: root)
+    // A second process (such as swift test) must not remove a live reader's leased files.
+    #expect(fm.fileExists(atPath: snapshot.file.path))
+    #expect(try Data(contentsOf: snapshot.file) == before)
+    _ = try second.snapshot(path: path)
+    #expect(try first.snapshot(path: path).directory == snapshot.directory)
+}
+
 @Test func usageSidecarsVanishBetweenReadsWithoutBeingRecreated() throws {
     let path = makeDB([], wal: true)
     FileManager.default.createFile(atPath: path + "-wal", contents: Data())

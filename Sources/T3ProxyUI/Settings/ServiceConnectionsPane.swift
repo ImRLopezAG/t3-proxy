@@ -1,0 +1,327 @@
+import SwiftUI
+import AppKit
+import T3ProxyCore
+
+public struct ConnectorsPane: View {
+    @State private var connections: [ServiceConnection] = []
+    @State private var message: String?
+    @State private var statuses: [UUID: String] = [:]
+    @State private var busy = false
+    @State private var committing = false
+    @State private var operation: Task<Void, Never>?
+    @State private var adding = false
+    @State private var diagnostics = false
+    @State private var removing: ServiceConnection?
+    @StateObject private var setupModel = ProxyClientSetupModel()
+    private var working: Bool { busy || setupModel.busy }
+    public init() {}
+    public var body: some View {
+        Form {
+            Section {
+                Text("Manage existing MCP servers and share each authenticated account with Codex Proxy and Claude Proxy.").foregroundStyle(.secondary)
+                Button("Proxy Setup…") { SettingsRouter.shared.pane = .gettingStarted }
+            }
+            if let message = message ?? setupModel.message { Section { Text(message).textSelection(.enabled) } }
+            Section {
+                if connections.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("No connections yet").fontWeight(.medium)
+                        Text("Add an existing MCP server. Use a separate connection for each account or workspace.").foregroundStyle(.secondary)
+                    }.padding(.vertical, 8)
+                }
+                ForEach(connections) { c in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(c.name).fontWeight(.medium)
+                                Text(c.identity ?? c.endpoint ?? c.command ?? "MCP server").font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                                Text(c.targets.map { $0 == .codex ? "Codex Proxy" : "Claude Proxy" }.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 8)
+                            if c.authentication == .oauth { Button("Sign In…") { signIn(c) }.disabled(working) }
+                            Button("Check") { check(c) }.disabled(working)
+                            Button { removing = c } label: { Image(systemName: "trash") }.help("Remove this connection").disabled(working)
+                        }
+                        Text(statuses[c.id] ?? "Tool access not checked in this session").font(.caption).foregroundStyle(.secondary)
+                    }.padding(.vertical, 4)
+                }
+                HStack {
+                    Button { adding = true } label: { Label("Add MCP Connection", systemImage: "plus") }.disabled(working)
+                    Spacer()
+                    if working {
+                        ProgressView().controlSize(.small)
+                        if committing || setupModel.committing { Text("Applying changes…").font(.caption) }
+                        Button("Cancel") { operation?.cancel(); setupModel.cancel() }.disabled(committing || setupModel.committing)
+                    }
+                }
+            } header: { Text("MCP connections") } footer: {
+                Text("Each connection keeps its chosen account and workspace across both clients.")
+            }
+            Section {
+                Text("Requires installed Codex CLI and Claude Code. Sign-in and available tools depend on the MCP server.").font(.caption).foregroundStyle(.secondary)
+                Button("Client Diagnostics…") { diagnostics = true }
+            }
+        }
+        .formStyle(.grouped)
+        .task { reload() }.onDisappear { operation?.cancel(); setupModel.cancel() }
+        .sheet(isPresented: $adding) { AddMCPConnection { reload(); setup() } }
+        .sheet(isPresented: $diagnostics) {
+            VStack { ClientConnectorDiagnostics(); Button("Done") { diagnostics = false }.padding() }.frame(minWidth: 640, minHeight: 600)
+        }
+        .confirmationDialog("Remove \(removing?.name ?? "connection")?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), presenting: removing) { c in
+            Button("Remove Connection", role: .destructive) { remove(c) }
+        } message: { _ in Text("Removes the connection from fresh sessions and stops existing sessions from forwarding it. Revoke OAuth consent separately in the service account.") }
+    }
+    private func reload() {
+        do { connections = try ServiceConnectionStore().load() }
+        catch { message = "Connections could not be read. Storage was preserved." }
+    }
+    private func setup() {
+        message = nil
+        setupModel.apply()
+    }
+    private func check(_ c: ServiceConnection) {
+        busy = true; message = nil
+        operation = Task { @MainActor in
+            defer { busy = false }
+            do { let status = try await ManagedMCP.inspect(c); statuses[c.id] = "\(status.tools.count) tools discovered · tool calls not yet verified" }
+            catch { statuses[c.id] = (error as? ServiceConnectionError)?.localizedDescription ?? "MCP discovery failed. Check the server and authorization." }
+        }
+    }
+    private func signIn(_ c: ServiceConnection) {
+        busy = true; message = "Complete this MCP server's consent flow in your browser. Choose the intended account and workspace."
+        operation = Task { @MainActor in
+            defer { busy = false }
+            do {
+                try await ManagedMCP.signIn(c) { url in Task { @MainActor in NSWorkspace.shared.open(url) } }
+                let status = try await ManagedMCP.inspect(c)
+                statuses[c.id] = "Signed in · \(status.tools.count) tools discovered · tool calls unverified"
+                message = "MCP authorization completed for \(c.name). Both selected clients use this connection."
+            } catch { message = (error as? ServiceConnectionError)?.localizedDescription ?? "MCP sign-in did not complete. This endpoint may need a pre-registered OAuth client or different authentication." }
+        }
+    }
+    private func remove(_ c: ServiceConnection) {
+        busy = true
+        operation = Task { @MainActor in
+            defer { committing = false }
+            do {
+                committing = true
+                try await mutate { try ServiceConnectionStore().remove(c.id); try ConnectorCredentialStore(account: c.id.uuidString).remove() }
+                try Task.checkCancellation()
+                statuses[c.id] = nil; reload(); busy = false; setup()
+            } catch { busy = false; if !Task.isCancelled { reload(); message = "Removal did not fully complete. Check storage and Keychain before retrying." } }
+        }
+    }
+}
+
+@MainActor
+private final class ProxyClientSetupModel: ObservableObject {
+    @Published private(set) var busy = false
+    @Published private(set) var committing = false
+    @Published private(set) var message: String?
+    private var operation: Task<Void, Never>?
+    func cancel() { operation?.cancel() }
+    func apply() {
+        guard !busy else { return }; busy = true; message = nil
+        let helper = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("T3Connectors").path ?? ""
+        operation = Task { @MainActor in
+            defer { busy = false; committing = false }
+            guard FileManager.default.isExecutableFile(atPath: helper) else { message = "The connection helper is missing. Install the complete T3 Proxy app bundle."; return }
+            guard await ProxyClient().health() else { message = "The hub is unavailable on the configured port. Start CLIProxyAPI or update Settings → CLIProxyAPI → Connection first."; return }
+            do {
+                try Task.checkCancellation()
+                let profiles = try ClientConnectors.profiles(settings: nil)
+                guard let codex = profiles.first(where: { $0.kind == .codex }), let claude = profiles.first(where: { $0.kind == .claude }),
+                      FileManager.default.isExecutableFile(atPath: codex.executable), FileManager.default.isExecutableFile(atPath: claude.executable) else { message = "Install Codex CLI and Claude Code before setup."; return }
+                let port = HubPort.current(), connections = try ServiceConnectionStore().load()
+                committing = true
+                let result = try await mutate { try ConnectorSetup(helper: helper, codex: codex.executable, claude: claude.executable, hubPort: port, connections: connections).install() }
+                try Task.checkCancellation()
+                message = result.changed.isEmpty ? "Setup is current. Start fresh proxy sessions to load managed connections." : "Configured \(result.changed.count) files and links. Start fresh proxy sessions. Registration is complete; inference and MCP access still need separate checks."
+            } catch is CancellationError { }
+            catch { if !Task.isCancelled { message = (error as? ConnectorSetupError)?.localizedDescription ?? "Setup failed. Check profile files and private backups before retrying." } }
+        }
+    }
+    func saveHubKey(_ value: String) {
+        guard !busy else { return }; busy = true; message = nil
+        operation = Task { @MainActor in
+            defer { busy = false; committing = false }
+            committing = true
+            do { try await mutate { try ConnectorCredentialStore(account: "hub-inference").save(.init(accessToken: value)) }; try Task.checkCancellation(); message = "Inference key saved in Keychain." }
+            catch { if !Task.isCancelled { message = "The inference key could not be saved." } }
+        }
+    }
+}
+
+struct ProxyClientSetupSection: View {
+    @StateObject private var model = ProxyClientSetupModel()
+    @State private var hubKey = ""
+    var body: some View {
+        Section {
+            Text("Set up Codex Proxy and Claude Proxy").font(.headline)
+            Text("Connect T3 Code to the hub, share skills and plugins, and register your managed MCP connections.").foregroundStyle(.secondary)
+            HStack {
+                Button("Set Up T3 Proxy") { model.apply() }.buttonStyle(.borderedProminent).disabled(model.busy)
+                Spacer()
+                if model.busy {
+                    ProgressView().controlSize(.small)
+                    if model.committing { Text("Applying changes…").font(.caption) }
+                    Button("Cancel") { model.cancel() }.disabled(model.committing)
+                }
+            }
+            DisclosureGroup("New profiles: hub inference key") {
+                SecureField("Hub API key", text: $hubKey)
+                Button("Save Inference Key") { let value = hubKey; hubKey = ""; model.saveHubKey(value) }.disabled(hubKey.isEmpty || model.busy)
+                Text("New client launchers use this Keychain item. Existing launchers keep their authentication. This is separate from the management key and MCP accounts.").font(.caption).foregroundStyle(.secondary)
+            }
+            Button("Manage MCP Connections…") { SettingsRouter.shared.pane = .connectors }.disabled(model.busy)
+            if let message = model.message { Text(message).textSelection(.enabled) }
+        } header: { Text("Proxy client setup") } footer: {
+            Text("Creates proxy profiles and missing customization links while preserving existing settings. Applies to new client sessions.")
+        }
+        .onDisappear { model.cancel() }
+    }
+}
+
+private func mutate<T: Sendable>(_ action: @escaping @Sendable () throws -> T) async throws -> T {
+    try Task.checkCancellation()
+    let worker = Task.detached { try Task.checkCancellation(); return try action() }
+    return try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+}
+
+private struct AddMCPConnection: View {
+    let saved: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var choosing = true
+    @State private var search = ""
+    @State private var preset: MCPConnectionPreset?
+    @State private var provider = ServiceProvider.remoteMCP
+    @State private var authentication = MCPAuthentication.oauth
+    @State private var name = ""
+    @State private var endpoint = ""
+    @State private var workspace = ""
+    @State private var token = ""
+    @State private var command = ""
+    @State private var arguments = "[]"
+    @State private var environment: [CredentialField] = []
+    @State private var codex = true
+    @State private var claude = true
+    @State private var busy = false
+    @State private var error: String?
+    private struct CredentialField: Identifiable { let id = UUID(); var name = ""; var value = "" }
+    private var matchingPresets: [MCPConnectionPreset] {
+        MCPConnectionCatalog.presets.filter { search.isEmpty || ($0.name + " " + $0.summary).localizedCaseInsensitiveContains(search) }
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(choosing ? "Quick Connections" : preset?.name ?? "Custom MCP Connection").font(.title2).fontWeight(.semibold)
+            if choosing {
+                Text("Choose a service, then connect the account you want to share.").foregroundStyle(.secondary)
+                TextField("Search services", text: $search).textFieldStyle(.roundedBorder)
+                List {
+                    ForEach(matchingPresets) { item in
+                        Button { choose(item) } label: {
+                            HStack(spacing: 12) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.name).fontWeight(.medium)
+                                    Text(item.summary).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(item.authentication == .oauth ? "Browser sign-in" : "Access token").font(.caption).foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
+                            }.padding(.vertical, 7).contentShape(Rectangle())
+                        }.buttonStyle(.plain).accessibilityLabel("Choose \(item.name)")
+                    }
+                }.listStyle(.inset)
+                if matchingPresets.isEmpty {
+                    Text("No matching service. Use Custom MCP for another server.").font(.callout).foregroundStyle(.secondary)
+                }
+            } else {
+                configuration
+            }
+            if let error { Text(error).font(.callout).foregroundStyle(.orange) }
+            HStack {
+                if choosing {
+                    Button("Custom MCP…") { choose(nil) }
+                } else {
+                    Button("All Services") { token = ""; environment = []; error = nil; choosing = true }.disabled(busy)
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(busy)
+                if !choosing {
+                    Button("Add Connection") { add() }.buttonStyle(.borderedProminent)
+                        .disabled(busy || name.trimmingCharacters(in: .whitespaces).isEmpty || (!codex && !claude) || (provider == .remoteMCP ? !ServiceConnection.validEndpoint(endpoint) || (authentication == .bearer && token.isEmpty) : command.isEmpty))
+                }
+            }
+        }.padding(24).frame(width: 620, height: 600)
+    }
+    private var configuration: some View {
+        Form {
+            TextField("Connection name", text: $name, prompt: Text("Work Gmail, Personal GitHub…"))
+            TextField("Account / workspace / project", text: $workspace)
+            if let preset {
+                Text(preset.summary).foregroundStyle(.secondary)
+                LabeledContent("Server") { Text(preset.endpoint).font(.caption).textSelection(.enabled) }
+                if let url = URL(string: preset.documentation) { Link("Service setup guide", destination: url) }
+                if authentication == .oauth {
+                    Text("After adding, choose Sign In to authorize this account in your browser. Available tools depend on your account permissions.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    SecureField("GitHub access token", text: $token)
+                    Text("Use a token with the repository permissions you need. It is stored in Keychain. GitHub browser sign-in requires a registered OAuth client.").font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                Picker("Transport", selection: $provider) { Text("Remote HTTP").tag(ServiceProvider.remoteMCP); Text("Local stdio").tag(ServiceProvider.stdio) }
+                if provider == .remoteMCP {
+                    TextField("MCP URL", text: $endpoint, prompt: Text("The server's documented MCP endpoint"))
+                    Picker("Authentication", selection: $authentication) {
+                        Text("OAuth · browser sign-in").tag(MCPAuthentication.oauth); Text("Bearer token").tag(MCPAuthentication.bearer); Text("None").tag(MCPAuthentication.none)
+                    }
+                    if authentication == .bearer { SecureField("Bearer token", text: $token) }
+                    Text("Use an existing MCP service and its consent flow. ChatGPT and Claude web connections cannot be imported automatically.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    TextField("Executable path", text: $command, prompt: Text("/opt/homebrew/bin/npx"))
+                    TextField("Arguments (JSON array)", text: $arguments)
+                    ForEach($environment) { $field in HStack { TextField("ENV_VARIABLE", text: $field.name); SecureField("Credential", text: $field.value) } }
+                    Button("Add Credential Variable") { environment.append(CredentialField()) }
+                    Text("Runs the executable you specify. Keep secrets in credential variables; those values are stored in Keychain.").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            HStack { Toggle("Codex Proxy", isOn: $codex); Toggle("Claude Proxy", isOn: $claude) }
+        }.formStyle(.grouped).disabled(busy)
+    }
+    private func choose(_ preset: MCPConnectionPreset?) {
+        self.preset = preset
+        provider = .remoteMCP; authentication = preset?.authentication ?? .oauth
+        name = preset?.name ?? ""; endpoint = preset?.endpoint ?? ""
+        workspace = ""; token = ""; command = ""; arguments = "[]"; environment = []; error = nil
+        choosing = false
+    }
+    private func add() {
+        do {
+            let args = try JSONDecoder().decode([String].self, from: Data(arguments.utf8))
+            var env: [String: String] = [:]
+            if provider == .stdio {
+                for field in environment {
+                    guard field.name.range(of: "^[A-Z_][A-Z0-9_]*$", options: .regularExpression) != nil, env[field.name] == nil else { throw ServiceConnectionError.invalidArguments }
+                    env[field.name] = field.value
+                }
+            }
+            let targets: [MCPClientTarget] = [codex ? .codex : nil, claude ? .claude : nil].compactMap { $0 }
+            let connection = preset?.makeConnection(name: name, identity: workspace.isEmpty ? nil : workspace, targets: targets) ?? ServiceConnection(provider: provider, name: name, identity: workspace.isEmpty ? nil : workspace, endpoint: provider == .remoteMCP ? endpoint : nil,
+                authentication: provider == .remoteMCP ? authentication : .none, command: provider == .stdio ? command : nil, arguments: provider == .stdio ? args : [], environmentNames: env.keys.sorted(), targets: targets)
+            let credential = ConnectorCredential(accessToken: authentication == .bearer && provider == .remoteMCP ? token : "", environment: env)
+            busy = true; error = nil
+            Task { @MainActor in
+                defer { busy = false }
+                do {
+                    try await Task.detached {
+                        let credentials = ConnectorCredentialStore(account: connection.id.uuidString)
+                        if !credential.accessToken.isEmpty || !credential.environment.isEmpty { try credentials.save(credential) }
+                        do { try ServiceConnectionStore().save(connection) } catch { try? credentials.remove(); throw error }
+                    }.value
+                    token = ""; environment = []; saved(); dismiss()
+                } catch { self.error = (error as? ServiceConnectionError)?.localizedDescription ?? "MCP connection could not be saved." }
+            }
+        } catch { self.error = "Check the executable, JSON argument array and unique credential variable names." }
+    }
+}

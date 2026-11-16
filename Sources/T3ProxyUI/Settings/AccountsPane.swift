@@ -1,10 +1,14 @@
 import SwiftUI
+import AppKit
 import T3ProxyCore
 
 struct AccountsPane: View {
     @ObservedObject var model: AccountsModel
     @ObservedObject var monitor: Monitor
     @ObservedObject private var routingGuard: RoutingGuard
+    @ObservedObject private var router = SettingsRouter.shared
+    @State private var search = ""
+    @State private var filter = AccountFilter.all
     @State private var selection: Credential.ID?
     @State private var showInspector = false
     @State private var pending: AccountChange?
@@ -18,16 +22,38 @@ struct AccountsPane: View {
     private var selected: Credential? { model.credentials.first { $0.id == selection } }
 
     var body: some View {
-        content
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                TextField("Search accounts, plans or teams", text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Search accounts")
+                Picker("Filter accounts", selection: $filter) {
+                    ForEach(AccountFilter.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.labelsHidden().fixedSize()
+            }.padding(20)
+            Divider()
+            content
+        }
             .navigationTitle("Accounts")
             .navigationSubtitle(model.updatedAt.map { "Updated \($0.formatted(date: .omitted, time: .shortened))" } ?? "")
-            .safeAreaInset(edge: .bottom) { banner }
+            .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 0) {
+                    banner
+                    HStack {
+                        Text("\(model.credentials.count) accounts").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        Button { router.addingAccount = true } label: { Label("Add Account", systemImage: "plus") }
+                            .buttonStyle(.borderedProminent).controlSize(.large).buttonBorderShape(.capsule)
+                            .keyboardShortcut("n", modifiers: .command)
+                    }.padding(16)
+                }.background(.bar)
+            }
             .inspector(isPresented: $showInspector) {
                 Group {
-                    if let c = selected { AccountInspector(c: c, model: model, ask: ask, edit: { editing = $0 }) }
+                    if let c = selected { AccountInspector(c: c, model: model, monitor: monitor, ask: ask, edit: { editing = $0 }) }
                     else { ContentUnavailableView("No Selection", systemImage: "person.crop.circle", description: Text("Select an account.")) }
                 }
-                .inspectorColumnWidth(min: 240, ideal: 270, max: 340)
+                .inspectorColumnWidth(min: 290, ideal: 320, max: 380)
             }
             .toolbar {
                 ToolbarItem {
@@ -46,6 +72,22 @@ struct AccountsPane: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: { Text($0.message) }
+            .sheet(isPresented: Binding(get: { router.addingAccount }, set: { router.addingAccount = $0 }), onDismiss: {
+                Task { await model.load() }
+            }) {
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("Add Account").font(.title2).fontWeight(.semibold)
+                        Spacer()
+                        Button("Done") { router.addingAccount = false }.keyboardShortcut(.cancelAction)
+                    }.padding(20)
+                    Divider()
+                    AddAccountPane(monitor: monitor)
+                }.frame(width: 620, height: 560)
+            }
+            .onChange(of: model.credentials) { _, values in
+                if let selection, !values.contains(where: { $0.id == selection }) { self.selection = nil; showInspector = false }
+            }
             .sheet(item: $editing) { req in
                 EditSheet(request: req) { change in editing = nil; pending = change }
             }
@@ -57,63 +99,91 @@ struct AccountsPane: View {
                 Label(monitor.management == .rejected ? "Key Rejected" : "No Management Key", systemImage: "key.slash")
             } description: {
                 Text(monitor.management == .rejected
-                     ? "Requests are paused until the key is replaced in Connection."
-                     : "Set the management key in Connection to see and manage accounts.")
+                     ? "Requests are paused until the key is replaced in Settings → CLIProxyAPI → Connection."
+                     : "Set the management key in Settings → CLIProxyAPI → Connection to see and manage accounts.")
             }
         } else if model.credentials.isEmpty && model.loading {
             ProgressView("Loading accounts…").frame(maxWidth: .infinity, maxHeight: .infinity)
         } else if model.credentials.isEmpty && model.error == nil {
             ContentUnavailableView("No Accounts", systemImage: "person.2.slash", description: Text("The hub has no credentials."))
         } else {
-            table
+            directory
         }
     }
 
-    private var table: some View {
-        Table(model.credentials, selection: $selection) {
-            TableColumn("Account") { c in
-                HStack(spacing: 8) {
-                    ProviderMark(provider: c.provider, size: 16, name: c.providerName)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(c.label.emailHidden).lineLimit(1)
-                        if c.nickname != nil || c.provider == .other {
-                            Text((c.provider == .other ? "\(c.providerName) · \(c.name)" : c.name).emailHidden)
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                        }
-                    }
-                    if model.busy == c.name { ProgressView().controlSize(.small) }
-                }
-                .opacity(c.disabled ? 0.55 : 1)
-            }
-            .width(min: 150, ideal: 210)
+    private var directory: some View {
+        let groups = AccountDirectory.groups(model.credentials, search: search, filter: filter)
+        return Table(of: Credential.self, selection: $selection) {
+            TableColumn("Account") { c in identity(c) }
+                .width(min: 140, ideal: 190)
             TableColumn("Plan") { c in
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(c.planLabel ?? "Unknown").foregroundStyle(c.planLabel == nil ? .secondary : .primary).lineLimit(1)
-                    if let o = c.org { Text(o).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(c.planLabel ?? "Unknown").lineLimit(1)
+                        .foregroundStyle(c.planLabel == nil ? .secondary : .primary)
+                    if let org = c.org {
+                        Text(org).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
                 }
             }
-                .width(min: 70, ideal: 100)
-            TableColumn("Status") { c in
-                if let pause = routingGuard.pause(for: c), pause.ownedMarker != nil {
-                    Text("Paused by Team guard until \(pause.resetAt.formatted(date: .abbreviated, time: .shortened))")
-                        .font(.caption).foregroundStyle(.secondary)
-                } else { StatusLabel(c: c, quota: quota(for: c)) }
+            .width(min: 90, ideal: 140)
+            TableColumn("Status") { c in status(c) }
+                .width(min: 96, ideal: 120)
+            TableColumn("5-hour") { c in
+                AccountQuotaCell(quota: quota(for: c), kind: .session, provider: c.provider)
             }
-                .width(min: 80, ideal: 105)
-            TableColumn("5-hour") { c in QuotaCell(c: c, quota: quota(for: c), kind: .session) }
-                .width(min: 64, ideal: 84)
-            TableColumn("Weekly") { c in QuotaCell(c: c, quota: quota(for: c), kind: .weekly) }
-                .width(min: 64, ideal: 84)
-            TableColumn("Priority") { c in Text("\(c.priority)").monospacedDigit().foregroundStyle(c.priority == 0 ? .secondary : .primary) }
-                .width(min: 44, ideal: 52)
+            .width(min: 90, ideal: 120)
+            TableColumn("Weekly") { c in
+                AccountQuotaCell(quota: quota(for: c), kind: .weekly, provider: c.provider)
+            }
+            .width(min: 90, ideal: 120)
+            TableColumn("Priority") { c in
+                Text("\(c.priority)").monospacedDigit()
+                    .foregroundStyle(c.priority == 0 ? .secondary : .primary)
+            }
+            .width(50)
+        } rows: {
+            ForEach(groups) { group in
+                Section {
+                    ForEach(group.credentials) { TableRow($0) }
+                } header: {
+                    HStack { Text(group.title); Text("\(group.credentials.count)").foregroundStyle(.tertiary) }
+                }
+            }
+        }
+        .tableStyle(.inset(alternatesRowBackgrounds: true))
+        .overlay {
+            if groups.isEmpty { ContentUnavailableView.search(text: search) }
         }
         .contextMenu(forSelectionType: Credential.ID.self) { ids in
             if let id = ids.first, let c = model.credentials.first(where: { $0.id == id }) {
                 AccountActions(c: c, busy: model.busy != nil, ask: ask, edit: { editing = $0 })
             }
         } primaryAction: { ids in
-            selection = ids.first; showInspector = true
+            if let id = ids.first { selection = id; showInspector = true }
         }
+        .onChange(of: selection) { _, value in if value != nil { showInspector = true } }
+    }
+
+    private func identity(_ c: Credential) -> some View {
+        HStack(spacing: 8) {
+            ProviderMark(provider: c.provider, size: 18, name: c.providerName)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(c.label.emailHidden).fontWeight(.medium).lineLimit(1).truncationMode(.middle)
+                if let duplicate = AccountDirectory.disambiguator(for: c, among: model.credentials) {
+                    Text(duplicate).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
+            }
+            if model.busy == c.name { ProgressView().controlSize(.small) }
+        }
+        .frame(minHeight: 34)
+        .opacity(c.disabled ? 0.6 : 1)
+    }
+
+    @ViewBuilder private func status(_ c: Credential) -> some View {
+        if let pause = routingGuard.pause(for: c), pause.ownedMarker != nil {
+            Label("Team guard", systemImage: "pause.circle").font(.caption).foregroundStyle(.secondary)
+                .help("Paused until \(pause.resetAt.formatted(date: .abbreviated, time: .shortened))")
+        } else { StatusLabel(c: c, quota: quota(for: c)).font(.caption) }
     }
 
     @ViewBuilder private var banner: some View {
@@ -138,40 +208,11 @@ struct AccountsPane: View {
     monitor.accounts.first { $0.name + ".json" == c.name || $0.name == c.name }?.quota
 }
 
-/// One quota window for one account: remaining % and time to reset, or why it is unknown.
-struct QuotaCell: View {
-    let c: Credential; let quota: QuotaReading?; let kind: QuotaWindowKind
-    var body: some View {
-        let now = Date()
-        if c.provider == .other || quota == nil {
-            Text("—").foregroundStyle(.tertiary)
-        } else if let q = quota, let r = q.remaining(kind, at: now) {
-            let reset = q.window(kind)?.resetAt
-            HStack(spacing: 5) {
-                Text("\(Int(r.rounded()))%").monospacedDigit().fontWeight(.medium)
-                    .foregroundStyle(r <= 0 ? .red : r < 10 ? .orange : .primary)
-                if let reset { Text(shortDuration(until: reset, from: now)).foregroundStyle(.secondary).lineLimit(1) }
-            }
-            .help(reset.map { "\(kind.title): \(Int(r.rounded()))% left · resets \($0.formatted(date: .abbreviated, time: .shortened))" } ?? kind.title)
-        } else if quota?.window(kind) != nil {
-            Text("Expired").foregroundStyle(.secondary)
-                .help("The last reading's window has reset. It updates on this account's next request.")
-        } else if quota?.source == .live {
-            Text("None reported").foregroundStyle(.tertiary)
-                .help("The provider's latest answer had no \(kind == .session ? "5-hour" : "weekly") window for this account (not started, or not part of its plan).")
-        } else {
-            Text("No reading").foregroundStyle(.tertiary)
-                .help("The hub has not recorded this limit for this account yet (or the plan has no such window).")
-        }
-    }
-}
-
 struct StatusLabel: View {
     let c: Credential
     var quota: QuotaReading? = nil
 
-    /// Hub state first (disabled, error, cooling); a healthy account whose recorded limit is used up
-    /// is "Limited" until that window resets, and under 10% left is "Near limit".
+    /// Genuine hub failures stay errors; provider quota responses and exhausted readings are "Limited".
     var body: some View {
         let now = Date()
         let windows = QuotaWindowKind.allCases.compactMap { k in quota?.remaining(k, at: now).map { (k, $0) } }
@@ -182,10 +223,15 @@ struct StatusLabel: View {
             case .disabled: return ("Disabled", "pause.circle.fill", .secondary, nil, c.reason ?? "Disabled")
             case .error: return ("Error", "exclamationmark.triangle.fill", .red, nil, c.reason ?? "Error")
             case .cooling: return ("Cooling", "clock.fill", .orange, c.retryAt.map { "until \($0.formatted(date: .omitted, time: .shortened))" }, c.reason ?? "Cooling")
-            case .healthy:
+            case .healthy, .limited:
                 if let (k, r) = low, r <= 0 {
                     return ("Limited", "hourglass", .orange, reset.map { "resets \(shortDuration(until: $0, from: now))" },
                             "\(k.title) limit reached; the hub routes to other accounts until it resets.")
+                }
+                if c.status == .limited {
+                    let retry = c.retryAt.flatMap { $0 > now ? $0 : nil }
+                    return ("Limited", "hourglass", .orange, retry.map { "retry in \(shortDuration(until: $0, from: now))" },
+                            c.reason ?? "Rate limited by the provider")
                 }
                 if let (k, r) = low, r < 10 {
                     return ("Near limit", "gauge.with.dots.needle.67percent", .yellow, "\(k == .session ? "5-hour" : "weekly") \(Int(r.rounded()))% left",
@@ -229,31 +275,34 @@ struct AccountActions: View {
 struct AccountInspector: View {
     let c: Credential
     @ObservedObject var model: AccountsModel
+    @ObservedObject var monitor: Monitor
     let ask: (AccountChange) -> Void
     let edit: (EditRequest) -> Void
+
+    private var account: Account? {
+        monitor.accounts.first { $0.name == c.name || $0.name + ".json" == c.name }
+    }
 
     var body: some View {
         Form {
             Section {
-                HStack(spacing: 10) {
-                    ProviderMark(provider: c.provider, size: 22, name: c.providerName)
-                    VStack(alignment: .leading) {
-                        Text(c.label.emailHidden).font(.headline)
-                        Text(c.name.emailHidden).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                if let account {
+                    QuotaAccountDetails(account: account, label: c.label.emailHidden, endpoint: monitor.endpointLabel,
+                                        live: LiveQuotaModel.shared(for: monitor), connected: monitor.management == .connected)
+                        .id(account.id)
+                } else {
+                    HStack(spacing: 10) {
+                        ProviderMark(provider: c.provider, size: 24, name: c.providerName)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(c.label.emailHidden).font(.headline)
+                            Text(c.planLabel ?? "Unknown plan").foregroundStyle(.secondary)
+                        }
                     }
                 }
-                LabeledContent("Provider", value: c.provider == .other ? c.providerName : c.provider.title)
-                LabeledContent("Plan", value: c.planLabel ?? "Unknown")
-                if let o = c.org { LabeledContent("Organization", value: o) }
-                LabeledContent("Status") { StatusLabel(c: c, quota: accountQuota(model.monitor, c)) }
-                if c.provider != .other {
-                    LabeledContent("5-hour") { QuotaCell(c: c, quota: accountQuota(model.monitor, c), kind: .session) }
-                    LabeledContent("Weekly") { QuotaCell(c: c, quota: accountQuota(model.monitor, c), kind: .weekly) }
-                }
-                if let r = c.reason { Text(r).font(.callout).foregroundStyle(.secondary) }
-                if let t = c.lastRefresh { LabeledContent("Last refresh", value: t.formatted(.relative(presentation: .named))) }
+                if let org = c.org { LabeledContent("Organization", value: org) }
+                LabeledContent("Routing status") { StatusLabel(c: c, quota: accountQuota(monitor, c)) }
             }
-            Section("Routing") {
+            Section("Manage account") {
                 Toggle("Enabled", isOn: Binding(get: { !c.disabled }, set: { ask(.setDisabled(c, !$0)) }))
                     .disabled(model.busy != nil)
                 LabeledContent("Priority") {
@@ -264,16 +313,29 @@ struct AccountInspector: View {
                 }
             }
             Section {
-                Button("Reset Cooldown", systemImage: "timer") { ask(.resetCooldown(c)) }
-                    .disabled(model.busy != nil || c.retryAt == nil)
-                Button("Refresh Token", systemImage: "arrow.triangle.2.circlepath") { ask(.refresh(c)) }
-                    .disabled(model.busy != nil)
+                DisclosureGroup("Troubleshooting") {
+                    if let reason = c.reason { Text(reason).font(.caption).foregroundStyle(.secondary) }
+                    if let time = c.lastRefresh { LabeledContent("Last refresh", value: time.formatted(.relative(presentation: .named))) }
+                    Button("Reset Cooldown", systemImage: "timer") { ask(.resetCooldown(c)) }
+                        .disabled(model.busy != nil || c.retryAt == nil)
+                    Button("Refresh Token", systemImage: "arrow.triangle.2.circlepath") { ask(.refresh(c)) }
+                        .disabled(model.busy != nil)
+                }
+                DisclosureGroup("Technical details") {
+                    LabeledContent("Provider", value: c.providerName)
+                    Text(c.name.emailHidden).font(.caption).textSelection(.enabled)
+                    Button("Copy filename", systemImage: "doc.on.doc") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(c.name.emailHidden, forType: .string)
+                    }
+                }
+            }
+            Section {
                 Button("Delete Account…", systemImage: "trash", role: .destructive) { ask(.delete(c)) }
                     .disabled(model.busy != nil || c.runtimeOnly)
                 if model.busy == c.name { ProgressView().controlSize(.small) }
             }
-        }
-        .formStyle(.grouped)
+        }.formStyle(.grouped)
     }
 }
 

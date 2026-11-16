@@ -41,6 +41,122 @@ private func limited(_ id: String, instance: String = "codex") -> T3CodeThread {
         let s = T3ThreadBoard.sections(snap([thread("a"), thread("b", status: "completed", updated: now - 60)]), now: now)
         #expect(s.map(\.group) == [.running, .finished])
     }
+    @Test func snoozedThreadsHaveOwnSectionAndStayOutOfFinishedCount() {
+        let snooze: [String: Any] = ["snoozedUntil": iso(now + 3600)]
+        let sleeping = [
+            thread("done", status: "completed", extra: snooze),
+            thread("failed", status: "failed", extra: snooze),
+            thread("active", extra: snooze.merging(["activeRunId": "run-active"]) { _, new in new }),
+            thread("question", extra: snooze.merging(["pendingRuntimeRequest": ["id": "q", "kind": "user_input"]]) { _, new in new }),
+            thread("limited", status: "failed", extra: ["snoozedUntil": iso(now + 3600), "lastErrorClass": "usage_limit",
+                "usageLimitResetAt": iso(now + 3600), "limitRecovery": ["runId": "run-limited", "resetAt": iso(now + 3600), "autoResume": true, "snooze": true]])
+        ]
+        let sections = T3ThreadBoard.sections(snap(sleeping + [thread("visible", status: "completed"), limited("awake-limit")]), now: now)
+        let finished = sections.first { $0.group == .finished }?.rows ?? []
+        let snoozed = sections.first { $0.group == .snoozed }?.rows ?? []
+        #expect(finished.map(\.id) == ["awake-limit", "visible"])
+        #expect(finished.count == 2 && snoozed.count == 5)
+        #expect(Set(snoozed.map(\.id)) == Set(sleeping.map(\.id)))
+        #expect(snoozed.allSatisfy { $0.status.label == "Snoozed" && !$0.canStop && !$0.canResume })
+        #expect(sections.reduce(0) { $0 + $1.rows.count } == 7)
+        #expect(T3ThreadBoard.sections(snap(sleeping), now: now).map(\.group.rawValue) == ["SNOOZED"])
+        #expect(T3ThreadBoard.footer(T3ThreadBoard.sections(snap(sleeping), now: now)) == "No active threads")
+    }
+    @Test func snoozedSectionPreservesVisibilityRulesAndSortsByWakeTime() {
+        let hidden = ["archivedAt", "deletedAt"].map { key in
+            thread(key, extra: [key: iso(now), "snoozedUntil": iso(now + 60)])
+        } + [thread("settled", extra: ["settledOverride": "settled", "snoozedUntil": iso(now + 60)])]
+        let sleeping = (1...7).map { i in
+            thread("s\(i)", status: "completed", updated: now - 48 * 3600,
+                extra: ["snoozedUntil": iso(now + Double(i) * 60)])
+        }
+        let sections = T3ThreadBoard.sections(snap(hidden + sleeping.reversed()), now: now)
+        #expect(sections.map(\.group) == [.snoozed])
+        #expect(sections.first?.rows.map(\.id) == sleeping.map(\.id))
+    }
+    @Test func snoozeDetailShowsWakeTimeWithoutPromisingExecution() {
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: "UTC")!
+        let morning = cal.date(from: DateComponents(year: 2026, month: 11, day: 13, hour: 10))!
+        let locale = Locale(identifier: "en_US")
+        let today = T3ThreadStatus.snoozed(until: morning + 3600).detail(now: morning, calendar: cal, locale: locale)?
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        #expect(today == "until 11:00 AM")
+        let tomorrow = T3ThreadStatus.snoozed(until: morning + 25 * 3600).detail(now: morning, calendar: cal, locale: locale)?
+            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        #expect(tomorrow?.hasPrefix("until ") == true)
+        #expect(tomorrow?.contains("Nov 14") == true && tomorrow?.contains("11:00 AM") == true)
+    }
+    @Test func snoozeExpirationRestoresNormalGrouping() {
+        let sleeping = thread("done", status: "completed", extra: ["snoozedUntil": iso(now + 60)])
+        #expect(T3ThreadBoard.sections(snap([sleeping]), now: now + 59).first?.group.rawValue == "SNOOZED")
+        #expect(T3ThreadBoard.sections(snap([sleeping]), now: now + 60).first?.rows.first?.id == "done")
+        #expect(T3ThreadBoard.sections(snap([sleeping]), now: now + 61).first?.group == .finished)
+    }
+    @Test func snoozedChildrenDoNotAffectParentRowsOrAttention() throws {
+        let parent = thread("parent", status: "completed")
+        let extra: [String: Any] = ["snoozedUntil": iso(now + 60),
+            "lineage": ["parentThreadId": "parent", "relationshipToParent": "subagent"]]
+        let question = thread("child", extra: extra.merging(["pendingRuntimeRequest": ["id": "q", "kind": "user_input"]]) { _, new in new })
+        let finished = thread("done-child", status: "completed", extra: extra)
+        let snapshot = snap([parent, question, finished])
+        let row = try #require(T3ThreadBoard.sections(snapshot, now: now).first?.rows.first)
+        #expect(row.id == "parent" && row.status == .done(at: now))
+        #expect(row.children.isEmpty && row.runningSubagents == 0 && row.hiddenFinishedChildren == 0)
+        #expect(!T3ThreadBoard.needsAttention(snapshot, now: now))
+        #expect(T3ThreadBoard.needsAttention(snapshot, now: now + 60))
+    }
+    @Test func snoozedRosterChildrenDoNotReappearAsMissingTasks() throws {
+        let parent = thread("parent", status: "completed", extra: ["pendingBackgroundTasks": [
+            ["taskId": "sleeping-task", "kind": "subagent", "childThreadId": "sleeping"],
+            ["taskId": "missing-task", "kind": "subagent", "childThreadId": "missing"],
+            ["taskId": "build", "kind": "command"]]])
+        let sleeping = thread("sleeping", extra: ["snoozedUntil": iso(now + 60)])
+        let snapshot = snap([parent, sleeping])
+        #expect(T3ThreadBoard.sections(snapshot, now: now).flatMap(\.rows).map(\.id) == ["parent"])
+        let row = try #require(T3ThreadBoard.sections(snapshot, now: now).first?.rows.first)
+        #expect(row.children.isEmpty)
+        #expect(row.backgroundTasks.map(\.taskId) == ["missing-task", "build"])
+        #expect(row.runningSubagents == 1)
+        let awake = try #require(T3ThreadBoard.sections(snapshot, now: now + 60).first?.rows.first)
+        #expect(awake.children.map(\.id) == ["sleeping"])
+        #expect(awake.backgroundTasks.map(\.taskId) == ["missing-task", "build"])
+        #expect(awake.runningSubagents == 2)
+    }
+    @Test func snoozedThreadsDoNotTriggerAttentionOrCompletionAlerts() {
+        var all = AlertSettings(); for kind in AlertKind.t3CodeKinds { all.set(kind, on: true) }
+        let (_, seeded) = T3ThreadAlertRules.evaluate(.init(), snap([thread("a")]), settings: all, now: now)
+        let variants: [(String, [String: Any])] = [("completed", [:]), ("failed", ["lastErrorClass": "usage_limit"]),
+            ("running", ["pendingRuntimeRequest": ["id": "q", "kind": "user_input"]])]
+        for (status, variant) in variants {
+            let sleeping = thread("a", status: status, extra: variant.merging(["snoozedUntil": iso(now + 60)]) { _, new in new })
+            let snapshot = snap([sleeping])
+            #expect(!T3ThreadBoard.needsAttention(snapshot, now: now))
+            let (alerts, _) = T3ThreadAlertRules.evaluate(seeded, snapshot, settings: all, now: now)
+            #expect(alerts.isEmpty)
+        }
+    }
+    @Test func snoozedParentStillSuppressesItsSnoozedRosterChild() throws {
+        let parent = thread("parent", extra: ["snoozedUntil": iso(now + 60), "pendingBackgroundTasks": [
+            ["taskId": "sleeping-task", "kind": "subagent", "childThreadId": "sleeping"]]])
+        let child = thread("sleeping", extra: ["snoozedUntil": iso(now + 120)])
+        let snapshot = snap([parent, child])
+        let sleeping = T3ThreadBoard.sections(snapshot, now: now)
+        #expect(sleeping.map(\.group) == [.snoozed])
+        #expect(sleeping.flatMap(\.rows).map(\.id) == ["parent"])
+        let parentAwake = T3ThreadBoard.sections(snapshot, now: now + 60)
+        #expect(parentAwake.flatMap(\.rows).map(\.id) == ["parent"])
+        #expect(parentAwake.first?.rows.first?.children.isEmpty == true)
+        let bothAwake = try #require(T3ThreadBoard.sections(snapshot, now: now + 120).first?.rows.first)
+        #expect(bothAwake.id == "parent" && bothAwake.children.map(\.id) == ["sleeping"])
+    }
+    @Test func snoozedRosterCycleKeepsOneRootVisible() {
+        func member(_ id: String, child: String) -> T3CodeThread {
+            thread(id, extra: ["snoozedUntil": iso(now + 60), "pendingBackgroundTasks": [
+                ["taskId": "task-\(child)", "kind": "subagent", "childThreadId": child]]])
+        }
+        let snapshot = snap([member("b", child: "a"), member("a", child: "b")])
+        #expect(T3ThreadBoard.sections(snapshot, now: now).flatMap(\.rows).map(\.id) == ["a"])
+    }
     @Test func needsYouKinds() {
         let q = thread("q", extra: ["pendingRuntimeRequest": ["id": "r1", "kind": "user_input"]])
         let a = thread("a", extra: ["pendingRuntimeRequest": ["id": "r2", "kind": "command", "createdAt": iso(now - 300)]])

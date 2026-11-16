@@ -54,6 +54,48 @@ func body(_ r: URLRequest) -> [String: AnyHashable] {
 let ok: @Sendable (URLRequest) -> (Int, String) = { r in r.httpMethod == "GET" ? (200, credentials) : (200, "{}") }
 
 @Suite(.serialized) @MainActor struct ManagementTests {
+    @Test func providerQuotaFailuresAreLimitedRatherThanErrors() throws {
+        // Synthetic Claude/Codex responses, including structured provider error codes.
+        let messages = ["HTTP 429: rate limit reached", "quota exhausted",
+                        #"{"error":{"type":"usage_limit_reached","message":"Limit reached"}}"#,
+                        #"{"error":{"type":"rate_limit_error"}}"#]
+        for provider in ["claude", "codex"] {
+            for message in messages {
+                let data = try JSONSerialization.data(withJSONObject: ["name": "account.json", "provider": provider,
+                    "status": "error", "unavailable": true, "status_message": message])
+                let entry = try JSONDecoder().decode(CredentialEntry.self, from: data)
+                let credential = try #require(Credential(entry))
+                #expect(credential.status.rawValue == "limited")
+                #expect(credential.reason == "Rate limited by the provider")
+                #expect(!credential.disabled)
+            }
+        }
+    }
+
+    @Test func unavailableQuotaAndDisabledCredentialsKeepDistinctStates() throws {
+        for disabled in [false, true] {
+            let data = try JSONSerialization.data(withJSONObject: ["name": "account.json", "provider": "codex",
+                "status": "active", "unavailable": true, "disabled": disabled, "status_message": "usage_limit_reached",
+                "cooldowns": [["scope": "credential", "retry_at": "2026-11-15T20:00:00Z"]]])
+            let credential = try #require(Credential(JSONDecoder().decode(CredentialEntry.self, from: data)))
+            #expect(credential.status.rawValue == (disabled ? "disabled" : "limited"))
+            #expect(credential.retryAt == Account.parseDate("2026-11-15T20:00:00Z"))
+        }
+    }
+
+    @Test func realCredentialFailuresRemainErrorsAndActiveAccountsIgnoreOldMessages() throws {
+        for message in ["401 unauthorized", "refresh token expired", "500 service unavailable", "request timed out",
+                        "unknown failure", "401 unauthorized while requesting quota", "503 quota endpoint unavailable",
+                        "quota endpoint timed out", "429 request rejected: refresh token expired",
+                        "rate limit endpoint timed out", "503 rate limit service unavailable"] {
+            let data = try JSONSerialization.data(withJSONObject: ["name": "account.json", "status": "error", "status_message": message])
+            let credential = try #require(Credential(JSONDecoder().decode(CredentialEntry.self, from: data)))
+            #expect(credential.status == .error)
+        }
+        let active = try JSONDecoder().decode(CredentialEntry.self, from: Data(#"{"name":"account.json","status":"active","status_message":"quota exhausted"}"#.utf8))
+        #expect(Credential(active)?.status == .healthy)
+    }
+
     @Test func decodesAllowlistedFields() async throws {
         let m = mgmtMonitor(MemStore("k"), ok)
         let c = try await m.management { try await $0.credentials(key: $1) }

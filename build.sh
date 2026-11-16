@@ -13,6 +13,7 @@ BIN=$(swift build -c release --show-bin-path)
 APP="dist/T3 Proxy.app"
 rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN/T3Proxy" "$APP/Contents/MacOS/"; cp App/Info.plist "$APP/Contents/"
+cp "$BIN/T3Connectors" "$APP/Contents/MacOS/"
 cp -R "$BIN/T3Proxy_T3ProxyUI.bundle" "$APP/Contents/Resources/"
 T=$(mktemp -d); swift tools/make-icon.swift design/references/t3-proxy-icon.png "$T/i.png"
 mkdir "$T/AppIcon.iconset"
@@ -22,8 +23,10 @@ for s in 16 32 128 256 512; do
 done
 iconutil -c icns "$T/AppIcon.iconset" -o "$APP/Contents/Resources/AppIcon.icns"; rm -rf "$T"
 if [ "$IDENTITY" = "-" ]; then
+  codesign --force --sign - "$APP/Contents/MacOS/T3Connectors"
   codesign --force --deep --sign - "$APP"
 else
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP/Contents/MacOS/T3Connectors"
   # The resource bundle holds no code, so only the app itself is signed (no --deep, as Apple recommends).
   codesign --force --options runtime --timestamp --sign "$IDENTITY" "$APP"
 fi
