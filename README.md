@@ -15,9 +15,13 @@ Written in Swift with SwiftUI and AppKit. No dependencies or web views for the U
   has), with a pace marker that warns before an account runs out. Hover an account for today, the current window
   and 30-day cost and tokens.
 - **Threads.** Your T3 Code threads as cards with project icon, branch, PR and provider. Subagents are listed
-  under their parent, and a click opens the thread in T3 Code.
+  under their parent, snoozed threads have their own section, and a click opens the thread in T3 Code.
+- **Menu-bar activity.** A layered orb shows working, background/waiting, needs-you and snoozed work together.
+  Choose colors that match your menu bar or your own palette, or keep the classic T3 icon. Idle and Reduce Motion stay still.
 - **Settings.** Add, rename, enable or disable, prioritize and delete accounts through the hub's own API. Also
   quota, routing, notifications, config, plugins, logs, usage recording and hub updates.
+- **Quota resets.** See available Claude reset grants and their expiry, including separate weekly and Fable
+  grants, and redeem supported Claude or Codex resets in the app after confirming.
 - **T3 Code limit bars.** It serves the endpoint T3 Code already uses on 127.0.0.1:8318, so T3 Code needs no
   extra setup.
 
@@ -54,7 +58,7 @@ curl -fsSL https://raw.githubusercontent.com/ImRLopezAG/t3-proxy/main/install.sh
 A specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ImRLopezAG/t3-proxy/main/install.sh | sh -s -- --version 0.2.1
+curl -fsSL https://raw.githubusercontent.com/ImRLopezAG/t3-proxy/main/install.sh | sh -s -- --version 0.3.0
 ```
 
 ### Manual
@@ -99,7 +103,7 @@ unsupported message. Store authentication, when required, is configured in the h
 
 ### Shared MCP connections
 
-Settings → **Connectors** manages existing MCP servers. Add a connection once, choose **Codex Proxy**,
+Settings → **Plugins → Connectors** manages existing MCP servers. Add a connection once, choose **Codex Proxy**,
 **Claude Proxy**, or both, then authenticate with that MCP service. Add separate named connections for
 each account or workspace, including multiple accounts at the same MCP URL. T3 Proxy does not build
 service integrations or import ChatGPT/Claude web connections.
@@ -161,9 +165,13 @@ your login Keychain until you delete it in Keychain Access.
 
 ## Dashboard and Settings
 
-The window has five sections: Dashboard, Accounts, Connectors, Plugins, and Settings. Dashboard combines live limits, usage statistics, the activity calendar, and account/model history. Accounts groups subscriptions by provider, with search, status filters, compact quota bars, and an inspector. Use **Add Account** (⌘N) to open sign-in or import in a dialog.
+The window has four sections: Dashboard, Accounts, Plugins, and Settings. Dashboard combines live limits, usage statistics, the activity calendar, and account/model history. Accounts groups subscriptions by provider, with search, status filters, compact quota bars, and an inspector. Use **Add Account** (⌘N) to open sign-in or import in a dialog. Plugins contains Installed, Browse, and Connectors tabs.
 
 Settings groups app preferences, T3 Code, CLIProxyAPI administration, and routing into tabs. Deck Migration appears when legacy Deck state is present. In Dashboard, hover an account for limits and reset details, or click to pin its inspector. The compact menu-bar panel keeps its side cards.
+
+Settings → T3 Proxy → General lets you choose the animated orb or classic T3 icon. Orb surfaces show concurrent work, background activity and requests; snoozed work uses still silver geometry. Choose **Match menu bar** for automatic contrast or **Custom** for independent Active, Background, Needs you and Error colors. Activity comes from T3 Code thread summaries; token-level streaming is not detected.
+
+See [the changelog](CHANGELOG.md) for release details.
 
 ## Usage history and cost estimates
 

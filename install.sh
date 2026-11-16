@@ -78,5 +78,5 @@ xattr -dr com.apple.quarantine "$DEST/$APP" 2>/dev/null || true
 installed=$(defaults read "$DEST/$APP/Contents/Info" CFBundleShortVersionString 2>/dev/null || echo "?")
 say "Installed T3 Proxy $installed in $DEST."
 say "Next: run the CLIProxyAPI hub (brew install cliproxyapi), then enter its management key in"
-say "T3 Proxy → Settings → Connection. Settings → Getting Started shows what's left."
+say "Settings → CLIProxyAPI → Connection. Settings → T3 Proxy → Setup shows what's left."
 open "$DEST/$APP"

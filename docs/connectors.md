@@ -23,7 +23,7 @@ next request; revoke provider consent separately when needed.
 
 ## Quick connections
 
-Settings → Connectors → Add MCP Connection offers a searchable list. Selecting a service fills in its
+Settings → Plugins → Connectors → Add MCP Connection offers a searchable list. Selecting a service fills in its
 documented endpoint and authentication method. You can rename the connection, identify its account or
 workspace, and choose either or both proxy clients. Adding it again creates a separate connection UUID.
 OAuth sign-in remains an explicit action after saving. Custom MCP retains manual HTTP and local stdio setup.

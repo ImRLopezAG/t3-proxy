@@ -1,6 +1,6 @@
 cask "t3-proxy" do
-  version "0.2.1"
-  sha256 "818e96c93e76edc8e483cf1f014179238117d69b2177b6d2e8910c042f5332a9"
+  version "0.3.0"
+  sha256 "4433cd1467d9798acd3cd1b5899bb4d47ae3815a988466e7083d876ca0b10ed6"
 
   url "https://github.com/ImRLopezAG/t3-proxy/releases/download/v#{version}/T3-Proxy.zip"
   name "T3 Proxy"
@@ -29,6 +29,6 @@ cask "t3-proxy" do
   caveats <<~EOS
     T3 Proxy reads a local CLIProxyAPI hub; it never installs or starts it:
       brew install cliproxyapi
-    Then enter the hub's management key in T3 Proxy → Settings → Connection.
+    Then enter the hub's management key in Settings → CLIProxyAPI → Connection.
   EOS
 end
