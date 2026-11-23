@@ -38,16 +38,24 @@ public final class RoutingGuard: ObservableObject {
     private var newAccounts: Set<String> = []
     private var baselineEstablished: Bool
     private var overridden: Set<String> = []
+    private var statePort: Int
 
-    private init(monitor: Monitor, defaults: UserDefaults = .standard) {
+    init(monitor: Monitor, defaults: UserDefaults = .standard) {
         self.monitor = monitor; self.defaults = defaults
+        let port = monitor.endpoint.port
+        statePort = port
         enabled = defaults.object(forKey: "routing.guard.enabled") as? Bool ?? true
         let t = defaults.integer(forKey: "routing.guard.threshold")
         threshold = [95, 98, 100].contains(t) ? t : 100
         subscriptionPriority = defaults.object(forKey: "routing.priority.subscription") as? Int ?? 10
         teamPriority = defaults.object(forKey: "routing.priority.team") as? Int ?? 0
         offerNewAccountPriorities = defaults.bool(forKey: "routing.priority.offerNew")
-        state = defaults.data(forKey: "routing.guard.state").flatMap { try? JSONDecoder().decode(TeamGuardState.self, from: $0) } ?? TeamGuardState()
+        if let legacyState = defaults.data(forKey: "routing.guard.state") {
+            let key = Self.stateKey(port)
+            if defaults.data(forKey: key) == nil { defaults.set(legacyState, forKey: key) }
+            defaults.removeObject(forKey: "routing.guard.state")
+        }
+        state = Self.loadState(defaults, port: port)
         known = Set(defaults.stringArray(forKey: "routing.priority.known") ?? [])
         baselineEstablished = defaults.object(forKey: "routing.priority.known") != nil
     }
@@ -67,15 +75,29 @@ public final class RoutingGuard: ObservableObject {
         }
     }
 
-    func pause(for c: Credential) -> GuardPause? { state.pause(for: c) }
+    func pause(for c: Credential) -> GuardPause? {
+        statePort == monitor.endpoint.port ? state.pause(for: c) : nil
+    }
     /// Called before a confirmed account status write, so even an uncertain write relinquishes ownership.
     func userOverride(_ c: Credential) {
+        let port = monitor.endpoint.port
+        if port != statePort {
+            var currentHubState = Self.loadState(defaults, port: port)
+            currentHubState.userOverride(c)
+            saveState(currentHubState, port: port)
+            return
+        }
         overridden.insert(TeamGuardState.accountID(c))
         state.userOverride(c); persist()
     }
-    private func persist() {
-        if let data = try? JSONEncoder().encode(state) { defaults.set(data, forKey: "routing.guard.state") }
+    private static func stateKey(_ port: Int) -> String { "routing.guard.state.\(port)" }
+    private static func loadState(_ defaults: UserDefaults, port: Int) -> TeamGuardState {
+        defaults.data(forKey: stateKey(port)).flatMap { try? JSONDecoder().decode(TeamGuardState.self, from: $0) } ?? TeamGuardState()
     }
+    private func saveState(_ value: TeamGuardState, port: Int) {
+        if let data = try? JSONEncoder().encode(value) { defaults.set(data, forKey: Self.stateKey(port)) }
+    }
+    private func persist() { saveState(state, port: statePort) }
 
     private func snapshot(_ c: Credential) -> RoutingAccount {
         // Monitor merges live readings by file name and profile plans have no observation time.
@@ -94,13 +116,18 @@ public final class RoutingGuard: ObservableObject {
     }
 
     func manualResume(_ c: Credential) async {
-        guard !busy, state.requestManualResume(c, now: Date()) else { return }
+        guard !busy, statePort == monitor.endpoint.port, state.requestManualResume(c, now: Date()) else { return }
         persist()
         await refresh()
     }
 
     func refresh() async {
         guard !busy, monitor.management == .connected, monitor.hasKey else { return }
+        let port = monitor.endpoint.port
+        if port != statePort {
+            statePort = port
+            state = Self.loadState(defaults, port: port)
+        }
         busy = true; overridden.removeAll(); defer { busy = false }
         let epoch = monitor.keyEpoch
         do {
@@ -138,6 +165,11 @@ public final class RoutingGuard: ObservableObject {
                 case .none: continue
                 case .pause(let reset):
                     try await monitor.management { try await $0.setDisabled(true, name: current.name, key: $1) }
+                    guard epoch == monitor.keyEpoch else { return }
+                    if !overridden.contains(TeamGuardState.accountID(current)) {
+                        state.acknowledgePause(current, now: Date())
+                        persist()
+                    }
                     let after = try await monitor.management { try await $0.credentials(key: $1) }
                     guard epoch == monitor.keyEpoch else { return }
                     if let paused = after.first(where: { $0.name == current.name && $0.provider == current.provider }),
@@ -147,7 +179,7 @@ public final class RoutingGuard: ObservableObject {
                     persist()
                     if state.pause(for: current)?.ownedMarker != nil {
                         await notify("Team account paused", "\(current.label.emailHidden) is paused until \(reset.formatted(date: .abbreviated, time: .shortened)).")
-                    } else { error = "A Team pause could not be verified. Check Accounts; automatic resume has been withheld." }
+                    }
                 case .resume:
                     do {
                         try await monitor.management { try await $0.resumeGuardCredential(name: current.name, key: $1) }
@@ -159,6 +191,7 @@ public final class RoutingGuard: ObservableObject {
                 }
                 guard epoch == monitor.keyEpoch else { return }
                 let after = try await monitor.management { try await $0.credentials(key: $1) }
+                guard epoch == monitor.keyEpoch else { return }
                 credentials = after.map { $0.with($0.accountKey.flatMap { plans[$0] }) }
                 for fresh in after {
                     // Only reconcile existing pending attempts; never reserve another write here.

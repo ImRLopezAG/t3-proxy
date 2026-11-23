@@ -140,7 +140,9 @@ struct RoutingPane: View {
                         Text("\(c.label.emailHidden): resume failed; will retry on a later refresh after \(pause.retryAfter?.formatted() ?? "the backoff").")
                     }
                     LabeledContent(c.label.emailHidden) {
-                        Text(pause.ownedMarker == nil ? "Pause not verified" : "Paused until \(pause.resetAt.formatted(date: .abbreviated, time: .shortened))")
+                        if pause.confirmationDeadline != nil { Text("Waiting for hub to confirm pause") }
+                        else if pause.ownedMarker == nil { Text("Pause not verified") }
+                        else { Text("Paused until \(pause.resetAt.formatted(date: .abbreviated, time: .shortened))") }
                     }
                 }
             }
