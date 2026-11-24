@@ -68,6 +68,29 @@ import Testing
         #expect(s.evaluate(snapshot(reset: reset, disabled: true), enabledCount: 1, now: reset) == .none)
         #expect(s.pauses.isEmpty)
     }
+    @Test func acknowledgedPauseOnlyClaimsMatchingDisablesWithinTheConfirmationWindow() {
+        let reset = now.addingTimeInterval(300)
+        let enabled = snapshot(reset: reset)
+        let paused = snapshot(reset: reset, disabled: true)
+        var s = TeamGuardState()
+        #expect(s.evaluate(enabled, enabledCount: 2, now: now) == .pause(reset))
+        s.acknowledgePause(enabled.credential, now: now)
+
+        var expired = s
+        #expect(expired.evaluate(paused, enabledCount: 1, now: reset) == .none)
+        #expect(expired.pause(for: paused.credential) == nil)
+        #expect(expired.recoveryNotices?[TeamGuardState.accountID(paused.credential)] != nil)
+
+        var replaced = s
+        var replacement = paused
+        replacement.credential.authIndex = "replacement"
+        #expect(replaced.evaluate(replacement, enabledCount: 1, now: now) == .none)
+        #expect(replaced.pauses.isEmpty)
+
+        s.userOverride(enabled.credential)
+        #expect(s.evaluate(paused, enabledCount: 1, now: now) == .none)
+        #expect(s.pauses.isEmpty)
+    }
     @Test func userEnableAndAppOverrideDropOwnership() {
         var s = TeamGuardState()
         let a = snapshot(reset: now.addingTimeInterval(300))

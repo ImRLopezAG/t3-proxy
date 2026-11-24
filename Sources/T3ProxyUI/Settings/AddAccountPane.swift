@@ -34,7 +34,7 @@ struct AddAccountPane: View {
     }
     private struct ImportFile { let data: Data; let name: String; let location: String }
 
-    private var busy: Bool { sending || phases.values.contains(where: \.busy) }
+    private var busy: Bool { store.busy }
     private var locked: Bool { monitor.management == .rejected || !monitor.hasKey }
     private var session: OAuthSession? {
         for phase in phases.values { if case .waiting(let s, _) = phase { return s } }
@@ -44,20 +44,29 @@ struct AddAccountPane: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                Text("Sign in with a provider to add an account to your local proxy. Finish in your browser, enter a device code, or import a service-account file.")
-                    .foregroundStyle(.secondary)
+                if let target = store.reauthentication {
+                    Text("Sign in with the original account for “\(target.credential.label.emailHidden)”.")
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Sign in with a provider to add an account to your local proxy. Finish in your browser, enter a device code, or import a service-account file.")
+                        .foregroundStyle(.secondary)
+                }
                 if locked {
                     Label(monitor.hasKey ? "Management key rejected. Check Settings → CLIProxyAPI → Connection." : "Set a management key in Settings → CLIProxyAPI → Connection first.", systemImage: "key.slash")
                         .foregroundStyle(.secondary)
                 }
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 166), spacing: 12, alignment: .top)], alignment: .leading, spacing: 12) {
-                    ForEach(OAuthProvider.allCases) { provider in card(provider) }
+                if let target = store.reauthentication, let provider = target.credential.reauthenticationProvider {
+                    card(provider)
+                } else {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 166), spacing: 12, alignment: .top)], alignment: .leading, spacing: 12) {
+                        ForEach(OAuthProvider.allCases) { provider in card(provider) }
+                    }
                 }
                 if let notice { Text(notice).font(.callout).foregroundStyle(.secondary) }
             }
             .padding(20)
         }
-        .navigationTitle("Add Account")
+        .navigationTitle(store.reauthentication == nil ? "Add Account" : "Re-sign In")
         .fileImporter(isPresented: $choosingFile, allowedContentTypes: [.json]) { result in chooseFile(result) }
         .confirmationDialog("Import Vertex service account?", isPresented: Binding(
             get: { pendingImport != nil },
@@ -70,8 +79,9 @@ struct AddAccountPane: View {
         }
         .onAppear {
             visible = true
-            if let s = session, case .waiting(_, let deadline) = phases[s.provider] { poll(s, until: deadline) }
+            if checkConnection(), let s = session, case .waiting(_, let deadline) = phases[s.provider] { poll(s, until: deadline) }
         }
+        .onChange(of: monitor.keyEpoch) { _, _ in _ = checkConnection() }
         .onDisappear {
             visible = false
             poller?.cancel(); poller = nil
@@ -99,8 +109,9 @@ struct AddAccountPane: View {
                     TextField("Location (optional)", text: $location, prompt: Text("us-central1"))
                         .textFieldStyle(.roundedBorder).disabled(busy || locked)
                 }
-                Button("Start") { start(p) }
-                    .disabled(busy || locked || (p == .vertex && !OAuthRules.isValidLocation(location.trimmingCharacters(in: .whitespacesAndNewlines))))
+                Button(store.reauthentication == nil ? "Start" : "Re-sign In") { start(p) }
+                    .disabled(busy || locked || store.reauthentication.map { $0.epoch != monitor.keyEpoch } == true ||
+                              (p == .vertex && !OAuthRules.isValidLocation(location.trimmingCharacters(in: .whitespacesAndNewlines))))
             }
         }
         .frame(maxWidth: .infinity, minHeight: 64, alignment: .topLeading)
@@ -116,7 +127,8 @@ struct AddAccountPane: View {
         case .starting, .cancelling:
             HStack { ProgressView().controlSize(.small); Text(phases[p] == .cancelling ? "Cancelling…" : "Starting…") }
         case .done:
-            Label("Account added", systemImage: "checkmark.circle.fill").foregroundStyle(.green)
+            Label(store.reauthentication == nil ? "Account added" : "Signed in again", systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
         case .failed(let message):
             Text(message).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
         case .waiting(let s, let deadline):
@@ -149,8 +161,11 @@ struct AddAccountPane: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Copy the full redirect address from your browser and paste it here.").font(.caption).foregroundStyle(.secondary)
                         TextField("Redirect URL", text: $store.callback).textFieldStyle(.roundedBorder).onSubmit(submit)
+                        if store.reauthentication != nil && !callback.isEmpty && !s.acceptsCallback(callback) {
+                            Text("Paste the full redirect address from this sign-in session.").font(.caption).foregroundStyle(.secondary)
+                        }
                         Button(sending ? "Sending…" : "Send Callback", action: submit)
-                            .disabled(sending || locked || !OAuthRules.isValidRedirect(callback))
+                            .disabled(sending || locked || !s.acceptsCallback(callback))
                     }
                 }
             }
@@ -159,7 +174,8 @@ struct AddAccountPane: View {
     }
 
     private func start(_ p: OAuthProvider) {
-        guard !busy, !locked else { return }
+        guard !busy, !locked, checkConnection() else { return }
+        let target = store.reauthentication
         callback = ""; notice = nil
         if p.method == .importFile {
             phases[p] = .choosing; choosingFile = true
@@ -168,28 +184,37 @@ struct AddAccountPane: View {
         phases[p] = .starting
         // Do not cancel this request when leaving: cancellation could lose an already-created hub session.
         Task {
+            guard isCurrent(target) else { return }
             do {
-                let s = try await monitor.management { try await $0.startOAuth(p, key: $1) }
+                let s = try await monitor.management { client, key in
+                    if let target { return try await client.startReauthentication(target.credential, key: key) }
+                    return try await client.startOAuth(p, key: key)
+                }
+                guard isCurrent(target) else { return }
                 let deadline = Date().addingTimeInterval(s.expiresIn ?? 600)
                 phases[p] = .waiting(s, deadline)
                 // The user asked for this sign-in, so the page opens even if they switched panes meanwhile;
                 // polling resumes when the pane is shown again.
                 if p.method == .browser { NSWorkspace.shared.open(s.url) }
                 if visible { poll(s, until: deadline) }
-            } catch { phases[p] = .failed(Self.message(error)) }
+            } catch {
+                guard isCurrent(target) else { return }
+                phases[p] = .failed(Self.message(error, reauthenticating: target != nil))
+            }
         }
     }
 
     private func poll(_ s: OAuthSession, until deadline: Date) {
         poller?.cancel()
+        let target = store.reauthentication
         poller = Task {
             while !Task.isCancelled {
                 do { try await Task.sleep(for: .seconds(s.pollInterval)) } catch { return }
-                guard !Task.isCancelled, visible, session?.state == s.state else { return }
+                guard !Task.isCancelled, visible, session?.state == s.state, isCurrent(target) else { return }
                 if Date() >= deadline { phases[s.provider] = .failed("The sign-in session expired. Start again."); return }
                 do {
-                    let status = try await monitor.management { try await $0.oauthStatus(state: s.state, key: $1) }
-                    guard !Task.isCancelled, visible, session?.state == s.state else { return }
+                    let status = try await monitor.management { try await $0.oauthStatus(for: s, key: $1) }
+                    guard !Task.isCancelled, visible, session?.state == s.state, isCurrent(target) else { return }
                     switch status {
                     case .wait: continue
                     case .ok:
@@ -198,7 +223,7 @@ struct AddAccountPane: View {
                     case .error(let message): phases[s.provider] = .failed(message); callback = ""; return
                     }
                 } catch {
-                    guard !Task.isCancelled, visible, session?.state == s.state else { return }
+                    guard !Task.isCancelled, visible, session?.state == s.state, isCurrent(target) else { return }
                     if error is ManagementError || error as? ProxyError == .unauthorized {
                         phases[s.provider] = .failed(Self.message(error)); return
                     }
@@ -209,15 +234,21 @@ struct AddAccountPane: View {
     }
 
     private func cancel(_ s: OAuthSession, deadline: Date) {
-        guard session?.state == s.state, !sending else { return }
+        guard session?.state == s.state, !sending, checkConnection() else { return }
+        let target = store.reauthentication
         poller?.cancel(); poller = nil
         phases[s.provider] = .cancelling; callback = ""
         Task {
+            guard isCurrent(target) else { return }
             do {
                 let cancelled = try await monitor.management { try await $0.cancelOAuth(state: s.state, key: $1) }
+                guard isCurrent(target) else { return }
                 if cancelled { phases[s.provider] = .idle; notice = "Sign-in cancelled."; return }
                 notice = "The hub did not cancel the session. Checking its status."
-            } catch { notice = Self.message(error) }
+            } catch {
+                guard isCurrent(target) else { return }
+                notice = Self.message(error)
+            }
             phases[s.provider] = .waiting(s, deadline)
             if visible { poll(s, until: deadline) }
         }
@@ -225,16 +256,36 @@ struct AddAccountPane: View {
 
     private func submit() {
         guard let s = session, s.provider.method == .browser,
-              !sending, !locked, OAuthRules.isValidRedirect(callback) else { return }
+              !sending, !locked, s.acceptsCallback(callback), checkConnection() else { return }
+        let target = store.reauthentication
         let raw = callback
         sending = true
         Task {
+            defer { if store.reauthentication == target { sending = false } }
+            guard isCurrent(target), session?.state == s.state else { return }
             do {
                 try await monitor.management { try await $0.submitOAuthCallback(s.provider, redirectURL: raw, key: $1) }
+                guard isCurrent(target), session?.state == s.state else { return }
                 callback = ""; notice = "Callback sent. Waiting for the hub to finish."
-            } catch { notice = Self.message(error) }
-            sending = false
+            } catch {
+                guard isCurrent(target), session?.state == s.state else { return }
+                notice = Self.message(error)
+            }
         }
+    }
+
+    private func isCurrent(_ target: AddAccountStore.Reauthentication?) -> Bool {
+        guard store.reauthentication == target else { return false }
+        return checkConnection()
+    }
+
+    private func checkConnection() -> Bool {
+        guard let target = store.reauthentication, let provider = target.credential.reauthenticationProvider,
+              target.epoch != monitor.keyEpoch else { return true }
+        phases[provider] = .failed("The hub connection changed. Close this window and reopen Re-sign In from the account list.")
+        sending = false; callback = ""; notice = nil
+        poller?.cancel(); poller = nil
+        return false
     }
 
     private func chooseFile(_ result: Result<URL, Error>) {
@@ -275,11 +326,13 @@ struct AddAccountPane: View {
         }
     }
 
-    static func message(_ e: Error) -> String {
+    static func message(_ e: Error, reauthenticating: Bool = false) -> String {
         switch e {
         case ManagementError.locked: "No accepted management key. Check Settings → CLIProxyAPI → Connection."
         case ProxyError.unauthorized: "The proxy rejected the management key."
         case ProxyError.unreachable: "The proxy isn't reachable."
+        case ProxyError.http(let c) where reauthenticating && [400, 404, 405].contains(c):
+            "The hub could not start re-sign-in for this account. Reload Accounts and check that CLIProxyAPI supports targeted sign-in."
         case ProxyError.http(let c): "The hub answered HTTP \(c)."
         case OAuthError.untrustedURL: "The hub returned an untrusted sign-in address. It was not opened."
         case OAuthError.invalidState: "The hub returned an invalid sign-in session."
@@ -287,6 +340,7 @@ struct AddAccountPane: View {
         case OAuthError.invalidRedirect: "Paste the full callback URL from the browser's address bar."
         case OAuthError.invalidImport: "Choose a JSON object in a .json file up to 256 KB with a simple filename."
         case OAuthError.invalidLocation: "Location must look like us-central1."
+        case OAuthError.unconfirmedTarget: "The hub did not confirm the selected account. Check that CLIProxyAPI supports targeted sign-in."
         case OAuthError.confirmationRequired: "Confirm the service-account import first."
         default: "The operation could not finish. Check the file or try again."
         }
@@ -295,11 +349,26 @@ struct AddAccountPane: View {
 
 /// Shared sign-in state for `AddAccountPane` (see the note on its `store`).
 @MainActor final class AddAccountStore: ObservableObject {
+    struct Reauthentication: Equatable {
+        let credential: Credential
+        let epoch: Int
+    }
+
     static let shared = AddAccountStore()
+    @Published var reauthentication: Reauthentication?
     @Published var phases: [OAuthProvider: AddAccountPane.Phase] = [:]
     @Published var callback = ""
     @Published var sending = false
     @Published var notice: String?
     var poller: Task<Void, Never>?
     var visible = false
+    var busy: Bool { sending || phases.values.contains(where: \.busy) }
+
+    func clearReauthenticationIfIdle() {
+        guard reauthentication != nil, !busy else { return }
+        reauthentication = nil
+        phases = [:]
+        callback = ""
+        notice = nil
+    }
 }

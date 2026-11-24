@@ -7,6 +7,7 @@ struct AccountsPane: View {
     @ObservedObject var monitor: Monitor
     @ObservedObject private var routingGuard: RoutingGuard
     @ObservedObject private var router = SettingsRouter.shared
+    @ObservedObject private var signIn = AddAccountStore.shared
     @State private var search = ""
     @State private var filter = AccountFilter.all
     @State private var selection: Credential.ID?
@@ -42,7 +43,16 @@ struct AccountsPane: View {
                     HStack {
                         Text("\(model.credentials.count) accounts").font(.caption).foregroundStyle(.secondary)
                         Spacer()
-                        Button { router.addingAccount = true } label: { Label("Add Account", systemImage: "plus") }
+                        Button {
+                            signIn.clearReauthenticationIfIdle()
+                            router.addingAccount = true
+                        } label: {
+                            if signIn.reauthentication != nil && signIn.busy {
+                                Label("Resume Sign-in", systemImage: "person.crop.circle")
+                            } else {
+                                Label("Add Account", systemImage: "plus")
+                            }
+                        }
                             .buttonStyle(.borderedProminent).controlSize(.large).buttonBorderShape(.capsule)
                             .keyboardShortcut("n", modifiers: .command)
                     }.padding(16)
@@ -50,7 +60,10 @@ struct AccountsPane: View {
             }
             .inspector(isPresented: $showInspector) {
                 Group {
-                    if let c = selected { AccountInspector(c: c, model: model, monitor: monitor, ask: ask, edit: { editing = $0 }) }
+                    if let c = selected {
+                        AccountInspector(c: c, model: model, monitor: monitor, ask: ask, edit: { editing = $0 },
+                                         canReauthenticate: canReauthenticate(c), reauthenticate: { reauthenticate(c) })
+                    }
                     else { ContentUnavailableView("No Selection", systemImage: "person.crop.circle", description: Text("Select an account.")) }
                 }
                 .inspectorColumnWidth(min: 290, ideal: 320, max: 380)
@@ -65,6 +78,7 @@ struct AccountsPane: View {
                 }
             }
             .task(id: monitor.management) { await model.load() }
+            .onChange(of: monitor.keyEpoch) { _, _ in Task { await model.load() } }
             .confirmationDialog(pending?.title ?? "", isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } }),
                                 titleVisibility: .visible, presenting: pending) { change in
                 Button(change.confirmLabel, role: change.isDestructive ? .destructive : nil) {
@@ -73,11 +87,13 @@ struct AccountsPane: View {
                 Button("Cancel", role: .cancel) {}
             } message: { Text($0.message) }
             .sheet(isPresented: Binding(get: { router.addingAccount }, set: { router.addingAccount = $0 }), onDismiss: {
+                signIn.clearReauthenticationIfIdle()
                 Task { await model.load() }
             }) {
                 VStack(spacing: 0) {
                     HStack {
-                        Text("Add Account").font(.title2).fontWeight(.semibold)
+                        Text(signIn.reauthentication == nil ? "Add Account" : "Re-sign In")
+                            .font(.title2).fontWeight(.semibold)
                         Spacer()
                         Button("Done") { router.addingAccount = false }.keyboardShortcut(.cancelAction)
                     }.padding(20)
@@ -156,7 +172,8 @@ struct AccountsPane: View {
         }
         .contextMenu(forSelectionType: Credential.ID.self) { ids in
             if let id = ids.first, let c = model.credentials.first(where: { $0.id == id }) {
-                AccountActions(c: c, busy: model.busy != nil, ask: ask, edit: { editing = $0 })
+                AccountActions(c: c, busy: model.busy != nil, ask: ask, edit: { editing = $0 },
+                               canReauthenticate: canReauthenticate(c), reauthenticate: { reauthenticate(c) })
             }
         } primaryAction: { ids in
             if let id = ids.first { selection = id; showInspector = true }
@@ -199,6 +216,21 @@ struct AccountsPane: View {
     }
 
     private func ask(_ c: AccountChange) { pending = c }
+
+    private func canReauthenticate(_ c: Credential) -> Bool {
+        !model.locked && model.busy == nil && model.credentialsEpoch == monitor.keyEpoch &&
+            (!signIn.busy || signIn.reauthentication?.credential.id == c.id)
+    }
+
+    private func reauthenticate(_ c: Credential) {
+        guard c.reauthenticationProvider != nil, canReauthenticate(c) else { return }
+        if !signIn.busy {
+            signIn.phases = [:]
+            signIn.notice = nil
+            signIn.reauthentication = .init(credential: c, epoch: monitor.keyEpoch)
+        }
+        router.addingAccount = true
+    }
 
     /// The hub's recorded rate-limit reading for this credential (from the Monitor's poll).
     private func quota(for c: Credential) -> QuotaReading? { accountQuota(monitor, c) }
@@ -254,6 +286,8 @@ struct AccountActions: View {
     let busy: Bool
     let ask: (AccountChange) -> Void
     let edit: (EditRequest) -> Void
+    let canReauthenticate: Bool
+    let reauthenticate: () -> Void
     var body: some View {
         Button(c.nickname == nil ? "Set Nickname…" : "Rename…", systemImage: "pencil") { edit(.rename(c)) }
             .disabled(busy || c.runtimeOnly)
@@ -266,6 +300,9 @@ struct AccountActions: View {
             .disabled(busy || c.retryAt == nil)
         Button("Refresh Token", systemImage: "arrow.triangle.2.circlepath") { ask(.refresh(c)) }
             .disabled(busy)
+        if c.reauthenticationProvider != nil {
+            ReauthenticateButton(enabled: canReauthenticate, action: reauthenticate)
+        }
         Divider()
         Button("Delete Account…", systemImage: "trash", role: .destructive) { ask(.delete(c)) }
             .disabled(busy || c.runtimeOnly)
@@ -278,6 +315,8 @@ struct AccountInspector: View {
     @ObservedObject var monitor: Monitor
     let ask: (AccountChange) -> Void
     let edit: (EditRequest) -> Void
+    let canReauthenticate: Bool
+    let reauthenticate: () -> Void
 
     private var account: Account? {
         monitor.accounts.first { $0.name == c.name || $0.name + ".json" == c.name }
@@ -311,6 +350,9 @@ struct AccountInspector: View {
                 LabeledContent("Nickname") {
                     Button(c.nickname?.emailHidden ?? "Set…") { edit(.rename(c)) }.disabled(model.busy != nil || c.runtimeOnly)
                 }
+                if c.reauthenticationProvider != nil {
+                    ReauthenticateButton(enabled: canReauthenticate, action: reauthenticate)
+                }
             }
             Section {
                 DisclosureGroup("Troubleshooting") {
@@ -336,6 +378,16 @@ struct AccountInspector: View {
                 if model.busy == c.name { ProgressView().controlSize(.small) }
             }
         }.formStyle(.grouped)
+    }
+}
+
+private struct ReauthenticateButton: View {
+    let enabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button("Re-sign In…", systemImage: "person.crop.circle", action: action)
+            .disabled(!enabled)
     }
 }
 

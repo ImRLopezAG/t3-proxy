@@ -85,6 +85,7 @@ public struct GuardPause: Codable, Sendable, Equatable {
     public var identity: String
     public var resumeStatus: GuardResumeStatus?
     public var retryAfter: Date?
+    public var confirmationDeadline: Date?
 }
 public enum TeamGuardAction: Sendable, Equatable { case none, pause(Date), resume }
 
@@ -109,12 +110,22 @@ public struct TeamGuardState: Codable, Sendable, Equatable {
     public func pause(for c: Credential) -> GuardPause? { pauses[Self.accountID(c)] }
 
     public mutating func userOverride(_ c: Credential) { pauses.removeValue(forKey: Self.accountID(c)) }
-    public mutating func confirmPause(_ c: Credential) {
+    public mutating func acknowledgePause(_ c: Credential, now: Date) {
+        let id = Self.accountID(c)
+        guard var p = pauses[id], Self.identity(c) == p.identity,
+              p.ownedMarker == nil, p.confirmationDeadline == nil else { return }
+        // Allow later polls to verify a successful write when the immediate read is stale or fails.
+        p.confirmationDeadline = now.addingTimeInterval(120)
+        pauses[id] = p
+    }
+
+    public mutating func confirmPause(_ c: Credential, now: Date = .now) {
         let id = Self.accountID(c)
         // Enabled before the write, disabled right after it: the pause is ours. The hub may or may not bump the marker.
         guard var p = pauses[id], c.disabled, Self.identity(c) == p.identity,
+              now <= (p.confirmationDeadline ?? .distantFuture),
               let marker = c.updatedMarker ?? p.previousMarker else { return }
-        p.ownedMarker = marker; pauses[id] = p
+        p.ownedMarker = marker; p.confirmationDeadline = nil; pauses[id] = p
     }
     public mutating func resumeFailed(_ c: Credential, failure: GuardResumeFailure, now: Date) {
         let id = Self.accountID(c)
@@ -149,6 +160,11 @@ public struct TeamGuardState: Codable, Sendable, Equatable {
                 if recoveryNotices == nil { recoveryNotices = [:] }
                 recoveryNotices?[id] = "The credential identity changed. Automatic recovery was cancelled; review Accounts."
                 pauses.removeValue(forKey: id); return .none
+            }
+            if let deadline = p.confirmationDeadline, now <= deadline {
+                confirmPause(c, now: now)
+                guard let confirmed = pauses[id], confirmed.ownedMarker != nil else { return .none }
+                p = confirmed
             }
             if !c.disabled { pauses.removeValue(forKey: id); return .none }
             guard p.ownedMarker != nil else {
