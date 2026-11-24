@@ -42,6 +42,75 @@ private let state = "abcDEF_123-xyz"
 private let start = #"{"status":"ok","url":"https://claude.ai/oauth/authorize?code=true&client_id=x&state=abcDEF_123-xyz","state":"abcDEF_123-xyz","expires_in":300}"#
 
 @Suite(.serialized) @MainActor struct OAuthTests {
+    @Test(arguments: [OAuthProvider.codex, .claude])
+    func reauthenticationTargetsExistingCredentialAndUsesTheSessionReceipt(_ provider: OAuthProvider) async throws {
+        let name = "\(provider.rawValue)-selected+team.json"
+        let authID = "team/\(name)"
+        let host = provider == .codex ? "auth.openai.com" : "claude.ai"
+        let m = oauthMonitor(MemStore("k")) { r in
+            switch r.url!.path {
+            case "/v8/management/credentials":
+                return (200, [:], """
+                {"files":[{"name":"\(name)","id":"\(authID)","provider":"\(provider.rawValue)","auth_index":"selected","account_type":"oauth","disabled":true}]}
+                """)
+            case "/v8/management/oauth/auth-url":
+                return (200, [:], """
+                {"status":"ok","url":"https://\(host)/oauth/authorize","state":"\(state)","target_auth_id":"\(authID)"}
+                """)
+            default:
+                return (200, [:], """
+                {"status":"ok","auth_id":"\(authID)","saved":true,"adopted":true}
+                """)
+            }
+        }
+        let credentials = try await m.management { try await $0.credentials(key: $1) }
+        let c = try #require(credentials.first)
+        let s = try await m.management { try await $0.startReauthentication(c, key: $1) }
+        #expect(s.provider == provider)
+        let request = try #require(OStub.seen.last)
+        #expect(request.url?.path == "/v8/management/oauth/auth-url")
+        #expect(request.httpMethod == "POST" && query(request) == ["is_webui": "true"])
+        let payload = try JSONDecoder().decode([String: String].self, from: oauthRequestData(request))
+        #expect(payload == ["name": name, "auth_index": "selected"])
+        #expect(s.acceptsCallback("http://localhost/callback?code=code&state=\(state)"))
+        #expect(!s.acceptsCallback("http://localhost/callback?code=code&state=someone-else"))
+        #expect(!s.acceptsCallback("http://localhost/callback?code=code&state=\(state)&state=someone-else"))
+        #expect(try await m.management { try await $0.oauthStatus(for: s, key: $1) } == .ok)
+    }
+
+    @Test(arguments: ["", "," + #""target_auth_id":"other.json""#])
+    func reauthenticationRejectsAndCancelsAnUnconfirmedTarget(_ field: String) async throws {
+        let m = oauthMonitor(MemStore("k")) { request in
+            if request.httpMethod == "DELETE" { return (200, [:], #"{"cancelled":true}"#) }
+            return (200, [:], """
+            {"status":"ok","url":"https://auth.openai.com/authorize","state":"\(state)"\(field)}
+            """)
+        }
+        let c = Credential(name: "codex-selected.json", provider: .codex)
+        await #expect(throws: OAuthError.unconfirmedTarget) {
+            try await m.management { try await $0.startReauthentication(c, key: $1) }
+        }
+        #expect(OStub.seen.map(\.httpMethod) == ["POST", "DELETE"])
+        let cancellation = try #require(OStub.seen.last)
+        #expect(cancellation.url?.path == "/v8/management/oauth/session")
+        #expect(query(cancellation) == ["state": state])
+    }
+
+    @Test(arguments: [
+        #"{"status":"ok","auth_id":"other.json","saved":true,"adopted":true}"#,
+        #"{"status":"ok","auth_id":"claude-selected.json","saved":false}"#,
+        #"{"status":"ok","auth_id":"claude-selected.json","saved":true,"adopted":false}"#,
+        #"{"status":"ok"}"#,
+        #"{"status":"error","error":"Authenticated account does not match target credential"}"#
+    ])
+    func reauthenticationDoesNotReportSuccessWithoutMatchingAdoption(_ reply: String) async throws {
+        let m = oauthMonitor(MemStore("k")) { _ in (200, [:], reply) }
+        let session = OAuthSession(provider: .claude, url: try #require(URL(string: "https://claude.ai/oauth")),
+                                   state: state, targetAuthID: "claude-selected.json")
+        let result = try await m.management { try await $0.oauthStatus(for: session, key: $1) }
+        guard case .error = result else { Issue.record("Unexpected re-sign-in result: \(result)"); return }
+    }
+
     @Test func catalogMatchesProxyDeck() {
         #expect(OAuthProvider.allCases.map(\.rawValue) == ["claude", "codex", "antigravity", "xai", "devin", "kimi", "kimi-ai", "meta", "vertex"])
         #expect(OAuthProvider.allCases.filter { $0.method == .browser }.map(\.rawValue) == ["claude", "codex", "antigravity", "xai", "devin"])

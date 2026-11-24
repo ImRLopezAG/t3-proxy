@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.1 — 2026-11-24
+
+- Re-sign in to an existing Claude or Codex OAuth account from its account inspector or context menu. This requires a CLIProxyAPI hub that supports targeted sign-in.
+- Preserve Team Limit Guard pauses when the hub is slow to confirm them, including across app restarts.
+
 ## 0.3.0 — 2026-11-16
 
 T3 Proxy brings account management, quota monitoring, plugins and shared MCP connections into one Settings window, with concurrent T3 Code activity visible in the menu bar.

@@ -58,7 +58,7 @@ curl -fsSL https://raw.githubusercontent.com/ImRLopezAG/t3-proxy/main/install.sh
 A specific version:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/ImRLopezAG/t3-proxy/main/install.sh | sh -s -- --version 0.3.0
+curl -fsSL https://raw.githubusercontent.com/ImRLopezAG/t3-proxy/main/install.sh | sh -s -- --version 0.3.1
 ```
 
 ### Manual

@@ -44,6 +44,8 @@ public struct Credential: Sendable, Identifiable, Equatable {
     public var updatedMarker: String?
     public var authIndex: String?
     public var chatgptAccountID: String?
+    var hubAuthID: String?
+    var accountType: String?
     /// Proxy Deck's opaque account key (plan cache lookups); nil without an auth index.
     public var accountKey: String? { authIndex.map(PlanCache.accountKey) }
 
@@ -81,7 +83,7 @@ public struct Credential: Sendable, Identifiable, Equatable {
     }
 }
 
-/// Allowlist decode. `path`, `email`, `label`, `account`, `id`, tokens and quota payloads are never decoded;
+/// Allowlist decode. `path`, `email`, `label`, `account`, tokens and quota payloads are never decoded;
 /// from `id_token` (already-parsed claims) only `plan_type` and `chatgpt_account_id` are read.
 struct CredentialEntry: Decodable {
     var name: String?
@@ -100,6 +102,8 @@ struct CredentialEntry: Decodable {
     var cooldowns: [Cooldown]?
     var last_refresh: String?
     var auth_index: String?
+    var id: String?
+    var account_type: String?
     var updated_at: String?
     struct Claims: Decodable { var plan_type: String?; var chatgpt_account_id: String? }
     struct Cooldown: Decodable { var scope: String?; var retry_at: String? }
@@ -112,6 +116,7 @@ struct CredentialEntry: Decodable {
         name = s(.name); provider = s(.provider); type = s(.type); note = s(.note)
         plan_type = s(.plan_type); plan = s(.plan); status = s(.status); status_message = s(.status_message)
         last_refresh = s(.last_refresh); auth_index = s(.auth_index); updated_at = s(.updated_at)
+        id = s(.id); account_type = s(.account_type)
         id_token = try? c.decodeIfPresent(Claims.self, forKey: .id_token)
         priority = (try? c.decodeIfPresent(Double.self, forKey: .priority)) ?? s(.priority).flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
         disabled = b(.disabled); unavailable = b(.unavailable); runtime_only = b(.runtime_only)
@@ -119,7 +124,7 @@ struct CredentialEntry: Decodable {
     }
     enum CodingKeys: String, CodingKey {
         case name, provider, type, note, plan_type, plan, id_token, priority, disabled, unavailable, runtime_only
-        case status, status_message, cooldowns, last_refresh, auth_index, updated_at
+        case status, status_message, cooldowns, last_refresh, auth_index, updated_at, id, account_type
     }
 }
 struct CredentialsEnvelope: Decodable { var files: [CredentialEntry] }
@@ -180,6 +185,8 @@ extension Credential {
         updatedMarker = e.updated_at.flatMap { $0.count <= 64 && Account.parseDate($0) != nil ? $0 : nil }
         authIndex = e.auth_index
         chatgptAccountID = e.id_token?.chatgpt_account_id
+        hubAuthID = e.id.flatMap { !$0.isEmpty && $0.utf8.count <= 1024 ? $0 : nil }
+        accountType = e.account_type
     }
 }
 

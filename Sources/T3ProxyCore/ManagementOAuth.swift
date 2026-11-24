@@ -57,6 +57,19 @@ public enum OAuthError: Error, Equatable {
     case untrustedURL
     case invalidRedirect
     case invalidDeviceCode, invalidImport, invalidLocation, confirmationRequired, unsupportedMethod
+    case unconfirmedTarget
+}
+
+extension Credential {
+    public var reauthenticationProvider: OAuthProvider? {
+        guard !runtimeOnly, ManagementRules.isValidFileName(name),
+              accountType == nil || accountType == "oauth" else { return nil }
+        switch provider {
+        case .codex: return .codex
+        case .claude: return .claude
+        case .other: return nil
+        }
+    }
 }
 
 /// A started hub session. `url` passed `OAuthRules.authURL`.
@@ -68,6 +81,15 @@ public struct OAuthSession: Sendable, Equatable {
     public var userCode: String? = nil
     /// Poll the hub's session status, never the provider's token endpoint.
     public var pollInterval: TimeInterval = 2
+    var targetAuthID: String? = nil
+
+    public func acceptsCallback(_ raw: String) -> Bool {
+        guard OAuthRules.isValidRedirect(raw) else { return false }
+        guard targetAuthID != nil else { return true }
+        let url = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let states = URLComponents(string: url)?.queryItems?.filter { $0.name == "state" }
+        return states?.count == 1 && states?.first?.value == state
+    }
 }
 
 public enum OAuthStatus: Sendable, Equatable {
@@ -125,6 +147,9 @@ public enum OAuthRules {
     }
 
     static func statusMessage(_ e: String?) -> String {
+        if e == "Authenticated account does not match target credential" {
+            return "That sign-in was for a different account. Start again and choose the original account."
+        }
         if let e, shownErrors.contains(where: { e.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil }) { return e }
         return "The hub reported that sign-in did not finish."
     }
@@ -139,17 +164,41 @@ public struct HubVersionInfo: Sendable, Equatable {
 extension ManagementClient {
     /// `GET /v8/management/oauth/auth-url?provider=…&is_webui=true`. Creates a session on the hub.
     public func startOAuth(_ p: OAuthProvider, key: String) async throws -> OAuthSession {
+        try await startOAuth(p, target: nil, key: key)
+    }
+
+    public func startReauthentication(_ credential: Credential, key: String) async throws -> OAuthSession {
+        guard let provider = credential.reauthenticationProvider else { throw OAuthError.unsupportedMethod }
+        return try await startOAuth(provider, target: credential, key: key)
+    }
+
+    private func startOAuth(_ p: OAuthProvider, target: Credential?, key: String) async throws -> OAuthSession {
         guard p.method != .importFile else { throw OAuthError.unsupportedMethod }
-        var query = [("provider", p.rawValue)]
+        var query: [(String, String)] = []
+        var body: Data?
+        if let target {
+            // Let the hub resolve the provider from the target. An older hub which ignores
+            // the target sees no provider, so it cannot start an ordinary add-account flow.
+            var fields = ["name": target.name]
+            if let index = target.authIndex, !index.isEmpty { fields["auth_index"] = index }
+            body = try JSONEncoder().encode(fields)
+        } else {
+            query.append(("provider", p.rawValue))
+        }
         if p.method == .browser { query.append(("is_webui", "true")) }
-        let (data, _) = try await request("GET", "v8/management/oauth/auth-url",
-                                          query, key: key)
+        let (data, _) = try await request(target == nil ? "GET" : "POST", "v8/management/oauth/auth-url",
+                                          query, key: key, body: body, contentType: body == nil ? nil : "application/json")
         struct R: Decodable {
             var url: String?; var state: String?; var expires_in: Double?; var interval: Double?
             var user_code: String?; var verification_uri: String?; var verification_uri_complete: String?; var flow: String?
+            var target_auth_id: String?
         }
         guard let r = try? JSONDecoder().decode(R.self, from: data), let state = r.state else { throw ProxyError.incompatible }
         guard OAuthRules.isValidState(state) else { throw OAuthError.invalidState }
+        if let target, r.target_auth_id != (target.hubAuthID ?? target.name) {
+            _ = try? await cancelOAuth(state: state, key: key)
+            throw OAuthError.unconfirmedTarget
+        }
         let rawURL = r.verification_uri_complete ?? r.verification_uri ?? r.url
         guard let url = rawURL.flatMap({ OAuthRules.authURL($0, for: p) }) else {
             // The session exists on the hub; end it rather than leave it open.
@@ -163,17 +212,38 @@ extension ManagementClient {
         }
         let ttl = r.expires_in.flatMap { $0 > 0 && $0 < 86_400 ? $0 : nil }
         let interval = r.interval.flatMap { $0.isFinite && $0 > 0 && $0 < 86_400 ? max(2, $0) : nil } ?? 2
-        return OAuthSession(provider: p, url: url, state: state, expiresIn: ttl, userCode: userCode, pollInterval: interval)
+        return OAuthSession(provider: p, url: url, state: state, expiresIn: ttl, userCode: userCode,
+                            pollInterval: interval, targetAuthID: target == nil ? nil : r.target_auth_id)
     }
 
     /// `GET /v8/management/oauth/status?state=…`.
     public func oauthStatus(state: String, key: String) async throws -> OAuthStatus {
+        try await oauthStatus(state: state, targetAuthID: nil, key: key)
+    }
+
+    public func oauthStatus(for session: OAuthSession, key: String) async throws -> OAuthStatus {
+        try await oauthStatus(state: session.state, targetAuthID: session.targetAuthID, key: key)
+    }
+
+    private func oauthStatus(state: String, targetAuthID: String?, key: String) async throws -> OAuthStatus {
         guard OAuthRules.isValidState(state) else { throw OAuthError.invalidState }
         let (data, _) = try await request("GET", "v8/management/oauth/status", [("state", state)], key: key)
-        struct R: Decodable { var status: String?; var error: String? }
+        struct R: Decodable {
+            var status: String?; var error: String?
+            var auth_id: String?; var saved: Bool?; var adopted: Bool?
+        }
         guard let r = try? JSONDecoder().decode(R.self, from: data) else { throw ProxyError.incompatible }
         switch r.status {
-        case "ok": return .ok
+        case "ok":
+            if let targetAuthID {
+                guard r.auth_id == targetAuthID, r.saved == true else {
+                    return .error("The hub could not confirm that it saved the sign-in for this account.")
+                }
+                guard r.adopted == true else {
+                    return .error("The hub saved the sign-in but did not load it. Check the account status and hub logs.")
+                }
+            }
+            return .ok
         case "wait": return .wait
         default: return .error(OAuthRules.statusMessage(r.error))
         }

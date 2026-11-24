@@ -62,6 +62,7 @@ final class AccountsModel: ObservableObject {
     @Published private(set) var credentials: [Credential] = []
     @Published private(set) var loading = false
     @Published private(set) var updatedAt: Date?
+    private(set) var credentialsEpoch: Int?
     @Published var error: String?
     @Published private(set) var busy: String?
     @Published var notice: String?
@@ -78,13 +79,15 @@ final class AccountsModel: ObservableObject {
         guard !locked else { credentials = []; return }
         loadGeneration += 1
         let g = loadGeneration
+        let epoch = monitor.keyEpoch
         loading = true
         defer { if g == loadGeneration { loading = false } }
         do {
             let fresh = try await monitor.management { try await $0.credentials(key: $1) }
-            guard g == loadGeneration else { return }
+            guard g == loadGeneration, epoch == monitor.keyEpoch else { return }
             let plans = await Task.detached(priority: .utility) { PlanCache.load() }.value
-            guard g == loadGeneration else { return }
+            guard g == loadGeneration, epoch == monitor.keyEpoch else { return }
+            credentialsEpoch = epoch
             credentials = fresh.map { c in
                 var result = c.with(c.accountKey.flatMap { plans[$0] })
                 let q = accountQuota(monitor, c)
@@ -93,7 +96,7 @@ final class AccountsModel: ObservableObject {
             }
             updatedAt = Date(); error = nil
         } catch {
-            guard g == loadGeneration else { return }
+            guard g == loadGeneration, epoch == monitor.keyEpoch else { return }
             if case ProxyError.unauthorized = error { credentials = [] }
             self.error = Self.describe(error)
         }
